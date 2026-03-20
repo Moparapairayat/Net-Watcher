@@ -201,6 +201,11 @@ h1 {
   color: var(--text);
 }
 
+.mode:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .panel {
   display: grid;
   grid-template-columns: 1fr 1.2fr;

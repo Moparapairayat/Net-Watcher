@@ -14,7 +14,6 @@ services:
     environment:
       NETWATCHER_LISTEN: 0.0.0.0:8080
       NETWATCHER_STATIC_DIR: /app/web
-      NETWATCHER_DB_DRIVER: postgres
       NETWATCHER_DB_DSN: postgres://netwatcher:${POSTGRES_PASSWORD}@timescaledb:5432/netwatcher?sslmode=disable
       NETWATCHER_TIMESCALE: "true"
       NETWATCHER_DB_BATCH: "250"

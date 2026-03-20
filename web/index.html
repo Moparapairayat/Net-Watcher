@@ -28,6 +28,7 @@
       <div class="modes">
         <button class="mode active" data-mode="ping">ICMP Ping</button>
         <button class="mode" data-mode="tcpping">TCP Ping</button>
+        <button class="mode" data-mode="portscan">Port Scan</button>
       </div>
     </header>
 
@@ -39,33 +40,44 @@
         </div>
 
         <div class="row">
-          <div class="field">
+          <div id="tcp-port-field" class="field">
             <label for="port">Port (TCP)</label>
             <input id="port" type="number" min="1" max="65535" value="443" />
           </div>
-          <div class="field">
+          <div id="count-field" class="field">
             <label for="count">Count</label>
             <input id="count" type="number" min="1" max="50" value="4" />
           </div>
         </div>
 
-        <div class="row">
+        <div id="scan-fields" class="row hidden">
           <div class="field">
+            <label for="ports">Ports / Ranges</label>
+            <input id="ports" type="text" value="22,80,443,8080" placeholder="22,80,443,8000-8100" />
+          </div>
+          <div class="field">
+            <label for="concurrency">Concurrency</label>
+            <input id="concurrency" type="number" min="1" max="256" value="64" />
+          </div>
+        </div>
+
+        <div class="row">
+          <div id="interval-field" class="field">
             <label for="interval">Interval (ms)</label>
             <input id="interval" type="number" min="100" value="1000" />
           </div>
-          <div class="field">
+          <div id="timeout-field" class="field">
             <label for="timeout">Timeout (ms)</label>
             <input id="timeout" type="number" min="100" value="2000" />
           </div>
-          <div class="field">
+          <div id="size-field" class="field">
             <label for="size">Payload Size</label>
             <input id="size" type="number" min="8" value="32" />
           </div>
         </div>
 
         <div class="row options">
-          <label class="checkbox">
+          <label id="ipv6-option" class="checkbox">
             <input id="ipv6" type="checkbox" />
             <span>Force IPv6</span>
           </label>
@@ -84,7 +96,7 @@
           <span id="status" class="status">Idle</span>
         </div>
 
-        <div class="chart-card">
+        <div id="chart-card" class="chart-card">
           <div class="chart-head">
             <h3>Latency (ms)</h3>
             <span id="chart-label">Realtime</span>
@@ -99,10 +111,10 @@
           <table>
             <thead>
               <tr>
-                <th>Seq</th>
-                <th>Status</th>
-                <th>RTT</th>
-                <th>Addr</th>
+                <th id="results-col-1">Seq</th>
+                <th id="results-col-2">Status</th>
+                <th id="results-col-3">RTT</th>
+                <th id="results-col-4">Addr</th>
               </tr>
             </thead>
             <tbody id="results"></tbody>

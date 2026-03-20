@@ -1,17 +1,12 @@
 # Net-Watcher
 
-Net-Watcher is a self-hosted network diagnostics toolkit built with Go. It combines a CLI, a local web server, realtime probe streaming, and production-ready infrastructure hooks for PostgreSQL/TimescaleDB, Redis, and S3-compatible object storage.
+Net-Watcher is a self-hosted network diagnostics toolkit built with Go. It combines a CLI, a local web server, realtime probe streaming, and a production stack built around PostgreSQL/TimescaleDB, Redis, and S3-compatible object storage.
 
 Developer: MOPARA PAIR AYAT
 
 ## Overview
 
-Net-Watcher is designed to run in two modes:
-
-- Lightweight local mode with SQLite
-- Production mode with PostgreSQL + TimescaleDB + Redis + S3-compatible object storage
-
-You run the server, open the dashboard in your browser, and inspect live ICMP or TCP probe results as they arrive. In production mode, the app can use:
+You run the server, open the dashboard in your browser, and inspect live ICMP, TCP, or port-scan results as they arrive. The app uses:
 
 - PostgreSQL/TimescaleDB for durable time-series history
 - Redis for fast history caching
@@ -20,9 +15,10 @@ You run the server, open the dashboard in your browser, and inspect live ICMP or
 Core capabilities:
 - ICMP ping
 - TCP ping
+- TCP port scan
 - Realtime WebSocket streaming
 - Stop/cancel for live runs
-- SQLite or PostgreSQL/TimescaleDB history
+- PostgreSQL/TimescaleDB history
 - Redis-backed history cache
 - Export endpoint with optional S3 upload
 - Latency chart + result table
@@ -44,7 +40,9 @@ Core capabilities:
 - `internal/report`
   result and summary model
 - `internal/store`
-  SQLite and PostgreSQL/TimescaleDB persistence, batching, retention
+  PostgreSQL/TimescaleDB persistence, batching, retention
+- `internal/portscan`
+  TCP connect port scanning
 - `web`
   frontend assets for the dashboard
 - `deploy`
@@ -53,7 +51,6 @@ Core capabilities:
 ## Tech Stack
 
 - Go
-- SQLite
 - PostgreSQL
 - TimescaleDB
 - Redis
@@ -68,6 +65,7 @@ Core capabilities:
 ```bash
 ./netwatcher ping 8.8.8.8
 ./netwatcher tcpping example.com --port 443
+./netwatcher portscan --ports 22,80,443 example.com
 ```
 
 ### Web UI
@@ -75,6 +73,7 @@ Core capabilities:
 - Realtime results
 - Live latency chart
 - History loading
+- Port scan mode
 - Mobile-friendly layout
 - Stop button for active WebSocket runs
 
@@ -82,6 +81,7 @@ Core capabilities:
 
 - `POST /api/ping`
 - `POST /api/tcpping`
+- `POST /api/portscan`
 - `GET /api/history`
 - `GET /api/export/history`
 - `GET /healthz`
@@ -94,7 +94,7 @@ Core capabilities:
 ```powershell
 go mod tidy
 go build -o netwatcher.exe .\cmd\netwatcher
-.\netwatcher.exe serve --listen 127.0.0.1:8080 --static .\web --db-driver sqlite --db .\netwatcher.db
+.\netwatcher.exe serve --listen 127.0.0.1:8080 --static .\web --db-dsn "postgres://netwatcher:change-me@127.0.0.1:5432/netwatcher?sslmode=disable" --timescale
 ```
 
 Open:
@@ -108,7 +108,7 @@ http://127.0.0.1:8080
 ```bash
 go mod tidy
 go build -o netwatcher ./cmd/netwatcher
-./netwatcher serve --listen 127.0.0.1:8080 --static ./web --db-driver sqlite --db ./netwatcher.db
+./netwatcher serve --listen 127.0.0.1:8080 --static ./web --db-dsn "postgres://netwatcher:change-me@127.0.0.1:5432/netwatcher?sslmode=disable" --timescale
 ```
 
 Open:
@@ -164,7 +164,6 @@ Recommended production stack:
 Environment variables:
 
 ```bash
-NETWATCHER_DB_DRIVER=postgres
 NETWATCHER_DB_DSN=postgres://netwatcher:change-me@timescaledb:5432/netwatcher?sslmode=disable
 NETWATCHER_TIMESCALE=true
 NETWATCHER_REDIS_ADDR=redis:6379
@@ -212,7 +211,7 @@ go vet ./...
 
 - This project is built for self-hosted use.
 - If you expose it publicly, put a trusted reverse proxy, tunnel, or access control layer in front of it.
-- Runtime artifacts such as `*.db`, `*.log`, and `*.exe` are ignored by `.gitignore`.
+- Runtime artifacts such as `*.log` and `*.exe` are ignored by `.gitignore`.
 - WebSocket is the primary realtime path. HTTP is used as a fallback path.
 - Production mode is designed around PostgreSQL/TimescaleDB + Redis + S3-compatible storage.
 
@@ -221,6 +220,7 @@ go vet ./...
 Implemented now:
 - ICMP ping
 - TCP ping
+- TCP port scan
 - Realtime Web UI
 - Realtime result streaming
 - History storage

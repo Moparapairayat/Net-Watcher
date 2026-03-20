@@ -25,6 +25,7 @@ import (
 	"netwatcher/internal/cache"
 	"netwatcher/internal/objectstore"
 	"netwatcher/internal/ping"
+	"netwatcher/internal/portscan"
 	"netwatcher/internal/report"
 	"netwatcher/internal/store"
 	"netwatcher/internal/tcpping"
@@ -36,6 +37,8 @@ const (
 	defaultProbeTimeout  = 2 * time.Second
 	defaultPingSize      = 32
 	defaultTCPPort       = 80
+	defaultScanPorts     = "22,80,443,8080"
+	defaultScanWorkers   = 64
 	maxProbeCount        = 100
 	minProbeInterval     = 100 * time.Millisecond
 	maxProbeInterval     = 60 * time.Second
@@ -43,6 +46,9 @@ const (
 	maxProbeTimeout      = 60 * time.Second
 	minPingSize          = 8
 	maxPingSize          = 65535
+	minScanConcurrency   = 1
+	maxScanConcurrency   = 256
+	maxScanPorts         = 4096
 	wsWriteTimeout       = 10 * time.Second
 	wsReadTimeout        = 60 * time.Second
 	maxJSONBodyBytes     = 8 << 10
@@ -67,6 +73,8 @@ func main() {
 		runPing(os.Args[2:])
 	case "tcpping":
 		runTCPPing(os.Args[2:])
+	case "portscan":
+		runPortScan(os.Args[2:])
 	case "serve":
 		runServe(os.Args[2:])
 	case "help", "-h", "--help":
@@ -84,11 +92,13 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintln(os.Stderr, "  netwatcher ping [flags] <host>")
 	fmt.Fprintln(os.Stderr, "  netwatcher tcpping [flags] <host>[:port]")
+	fmt.Fprintln(os.Stderr, "  netwatcher portscan [flags] <host>")
 	fmt.Fprintln(os.Stderr, "  netwatcher serve [flags]")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Commands:")
 	fmt.Fprintln(os.Stderr, "  ping     ICMP echo (requires root or CAP_NET_RAW)")
 	fmt.Fprintln(os.Stderr, "  tcpping  TCP connect latency")
+	fmt.Fprintln(os.Stderr, "  portscan TCP connect port scan")
 	fmt.Fprintln(os.Stderr, "  serve    Web UI + REST API")
 }
 
@@ -196,14 +206,54 @@ func runTCPPing(args []string) {
 	printTCPPing(rep)
 }
 
+func runPortScan(args []string) {
+	fs := flag.NewFlagSet("portscan", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	portsSpec := fs.String("ports", defaultScanPorts, "comma-separated ports and ranges (for example 22,80,443,8000-8100)")
+	timeout := fs.Duration("timeout", defaultProbeTimeout, "per-port timeout")
+	concurrency := fs.Int("concurrency", defaultScanWorkers, "maximum parallel connection attempts")
+	jsonOut := fs.Bool("json", false, "JSON output")
+
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: netwatcher portscan [flags] <host>")
+		fs.PrintDefaults()
+	}
+
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		os.Exit(2)
+	}
+
+	if fs.NArg() < 1 {
+		fs.Usage()
+		os.Exit(2)
+	}
+
+	host, ports, cfg, err := normalizePortScanRequest(fs.Arg(0), *portsSpec, *timeout, *concurrency)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+
+	rep, err := portscan.Run(host, cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		printPortScanJSON(rep)
+		return
+	}
+	printPortScan(rep, ports)
+}
+
 func runServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
 	listen := fs.String("listen", envString("NETWATCHER_LISTEN", "127.0.0.1:8080"), "listen address")
 	staticDir := fs.String("static", envString("NETWATCHER_STATIC_DIR", "web"), "static directory for UI assets")
-	dbDriver := fs.String("db-driver", envString("NETWATCHER_DB_DRIVER", store.DriverSQLite), "database driver: sqlite or postgres")
-	dbPath := fs.String("db", envString("NETWATCHER_DB_PATH", "netwatcher.db"), "sqlite database path")
 	dbDSN := fs.String("db-dsn", envString("NETWATCHER_DB_DSN", ""), "postgres/timescaledb DSN")
 	dbBatch := fs.Int("db-batch", envInt("NETWATCHER_DB_BATCH", 100), "database batch insert size")
 	dbFlush := fs.Duration("db-flush", envDuration("NETWATCHER_DB_FLUSH", 1*time.Second), "database flush interval")
@@ -242,8 +292,6 @@ func runServe(args []string) {
 	}()
 
 	st, err := store.OpenConfigured(store.Config{
-		Driver:           *dbDriver,
-		Path:             *dbPath,
 		DSN:              *dbDSN,
 		BatchSize:        *dbBatch,
 		FlushInterval:    *dbFlush,
@@ -305,6 +353,7 @@ func runServe(args []string) {
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/api/ping", handlePing)
 	mux.HandleFunc("/api/tcpping", handleTCPPing)
+	mux.HandleFunc("/api/portscan", handlePortScan)
 	mux.HandleFunc("/api/history", handleHistory)
 	mux.HandleFunc("/api/export/history", handleHistoryExport)
 	mux.HandleFunc("/ws", handleWS)
@@ -321,14 +370,8 @@ func runServe(args []string) {
 
 	fmt.Printf("NetWatcher UI listening on http://%s\n", *listen)
 	fmt.Printf("Serving static files from %s\n", *staticDir)
-	switch appStore.Driver() {
-	case store.DriverPostgres:
-		fmt.Printf("Database: postgres/timescale\n")
-		fmt.Printf("DB batch=%d flush=%s retention=%s max-open=%d max-idle=%d timescale=%t\n", *dbBatch, dbFlush.String(), dbRetention.String(), *dbMaxOpen, *dbMaxIdle, *timescale)
-	default:
-		fmt.Printf("Database: sqlite (%s)\n", *dbPath)
-		fmt.Printf("DB batch=%d flush=%s retention=%s\n", *dbBatch, dbFlush.String(), dbRetention.String())
-	}
+	fmt.Printf("Database: postgres/timescale\n")
+	fmt.Printf("DB batch=%d flush=%s retention=%s max-open=%d max-idle=%d timescale=%t\n", *dbBatch, dbFlush.String(), dbRetention.String(), *dbMaxOpen, *dbMaxIdle, *timescale)
 	if rc != nil {
 		fmt.Printf("Redis cache: %s db=%d ttl=%s\n", *redisAddr, *redisDB, redisTTL.String())
 	}
@@ -466,6 +509,43 @@ func normalizeTCPPingRequest(host string, port, count int, interval, timeout tim
 		Count:    normalizedCount,
 		Interval: normalizedInterval,
 		Timeout:  normalizedTimeout,
+	}, nil
+}
+
+func normalizePortScanRequest(host, portsSpec string, timeout time.Duration, concurrency int) (string, []int, portscan.Config, error) {
+	var err error
+	host, err = normalizeHost(host)
+	if err != nil {
+		return "", nil, portscan.Config{}, err
+	}
+
+	ports, err := portscan.ParsePorts(portsSpec)
+	if err != nil {
+		return "", nil, portscan.Config{}, err
+	}
+	if len(ports) > maxScanPorts {
+		return "", nil, portscan.Config{}, fmt.Errorf("scan is limited to %d ports per request", maxScanPorts)
+	}
+
+	normalizedTimeout, err := normalizeProbeTimeout(timeout)
+	if err != nil {
+		return "", nil, portscan.Config{}, err
+	}
+
+	if concurrency == 0 {
+		concurrency = defaultScanWorkers
+	}
+	if concurrency < minScanConcurrency || concurrency > maxScanConcurrency {
+		return "", nil, portscan.Config{}, fmt.Errorf("concurrency must be %d-%d", minScanConcurrency, maxScanConcurrency)
+	}
+	if concurrency > len(ports) {
+		concurrency = len(ports)
+	}
+
+	return host, ports, portscan.Config{
+		Ports:       ports,
+		Timeout:     normalizedTimeout,
+		Concurrency: concurrency,
 	}, nil
 }
 
@@ -690,6 +770,41 @@ func printTCPPing(rep report.Report) {
 	printSummary(rep)
 }
 
+func printPortScan(rep portscan.Report, ports []int) {
+	fmt.Printf("TCP PORT SCAN %s", rep.Target)
+	if rep.Addr != "" {
+		fmt.Printf(" (%s)", rep.Addr)
+	}
+	fmt.Println()
+
+	for _, result := range rep.Results {
+		if result.State == "open" {
+			fmt.Printf("port=%d state=open time=%s", result.Port, formatDuration(result.RTT))
+		} else {
+			fmt.Printf("port=%d state=%s", result.Port, result.State)
+		}
+		if result.Addr != "" {
+			fmt.Printf(" addr=%s", result.Addr)
+		}
+		if result.Error != "" && result.State != "open" {
+			fmt.Printf(" error=%s", result.Error)
+		}
+		fmt.Println()
+	}
+
+	fmt.Printf("--- %s tcp-portscan statistics ---\n", rep.Target)
+	fmt.Printf("%d ports scanned, %d open, %d closed, %d timeout, completed in %s\n",
+		rep.Summary.Scanned,
+		rep.Summary.Open,
+		rep.Summary.Closed,
+		rep.Summary.Timeout,
+		rep.Summary.Duration.Round(time.Millisecond),
+	)
+	if len(ports) > 0 {
+		fmt.Printf("%d requested ports\n", len(ports))
+	}
+}
+
 func printSummary(rep report.Report) {
 	fmt.Printf("--- %s %s statistics ---\n", rep.Target, rep.Protocol)
 	fmt.Printf("%d probes, %d replies, %.1f%% loss\n", rep.Summary.Sent, rep.Summary.Recv, rep.Summary.Loss)
@@ -704,7 +819,9 @@ func printSummary(rep report.Report) {
 }
 
 type jsonResult struct {
-	Seq   int      `json:"seq"`
+	Seq   int      `json:"seq,omitempty"`
+	Port  int      `json:"port,omitempty"`
+	State string   `json:"state,omitempty"`
 	RTT   string   `json:"rtt,omitempty"`
 	RTTMs *float64 `json:"rtt_ms,omitempty"`
 	Error string   `json:"error,omitempty"`
@@ -712,13 +829,18 @@ type jsonResult struct {
 }
 
 type jsonSummary struct {
-	Sent   int     `json:"sent"`
-	Recv   int     `json:"recv"`
-	Loss   float64 `json:"loss"`
-	Min    string  `json:"min,omitempty"`
-	Avg    string  `json:"avg,omitempty"`
-	Max    string  `json:"max,omitempty"`
-	StdDev string  `json:"stddev,omitempty"`
+	Sent     int     `json:"sent"`
+	Recv     int     `json:"recv"`
+	Loss     float64 `json:"loss"`
+	Min      string  `json:"min,omitempty"`
+	Avg      string  `json:"avg,omitempty"`
+	Max      string  `json:"max,omitempty"`
+	StdDev   string  `json:"stddev,omitempty"`
+	Scanned  int     `json:"scanned,omitempty"`
+	Open     int     `json:"open,omitempty"`
+	Closed   int     `json:"closed,omitempty"`
+	Timeout  int     `json:"timeout,omitempty"`
+	Duration string  `json:"duration,omitempty"`
 }
 
 type jsonReport struct {
@@ -732,6 +854,13 @@ type jsonReport struct {
 
 func printJSON(rep report.Report) {
 	jr := toJSONReport(rep)
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(jr)
+}
+
+func printPortScanJSON(rep portscan.Report) {
+	jr := toJSONPortScanReport(rep)
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(jr)
@@ -763,15 +892,24 @@ type tcpPingRequest struct {
 	TimeoutMs  int    `json:"timeout_ms"`
 }
 
+type portScanRequest struct {
+	Host        string `json:"host"`
+	Ports       string `json:"ports"`
+	TimeoutMs   int    `json:"timeout_ms"`
+	Concurrency int    `json:"concurrency"`
+}
+
 type wsRequest struct {
-	Type       string `json:"type"`
-	Host       string `json:"host"`
-	Port       int    `json:"port,omitempty"`
-	Count      int    `json:"count"`
-	IntervalMs int    `json:"interval_ms"`
-	TimeoutMs  int    `json:"timeout_ms"`
-	Size       int    `json:"size"`
-	IPv6       bool   `json:"ipv6"`
+	Type        string `json:"type"`
+	Host        string `json:"host"`
+	Port        int    `json:"port,omitempty"`
+	Ports       string `json:"ports,omitempty"`
+	Count       int    `json:"count"`
+	IntervalMs  int    `json:"interval_ms"`
+	TimeoutMs   int    `json:"timeout_ms"`
+	Size        int    `json:"size"`
+	IPv6        bool   `json:"ipv6"`
+	Concurrency int    `json:"concurrency,omitempty"`
 }
 
 type wsEvent struct {
@@ -1064,6 +1202,48 @@ func handleTCPPing(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toJSONReport(rep))
 }
 
+func handlePortScan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	if !isAllowedRequestOrigin(r) {
+		writeJSON(w, http.StatusForbidden, apiError{Error: "forbidden origin"})
+		return
+	}
+
+	var req portScanRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+
+	timeout := defaultProbeTimeout
+	if req.TimeoutMs > 0 {
+		timeout = time.Duration(req.TimeoutMs) * time.Millisecond
+	}
+
+	host, _, cfg, err := normalizePortScanRequest(req.Host, req.Ports, timeout, req.Concurrency)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	release, ok := tryAcquireProbeSlot()
+	if !ok {
+		writeJSON(w, http.StatusTooManyRequests, apiError{Error: "server busy, try again"})
+		return
+	}
+	defer release()
+
+	rep, err := portscan.RunContext(r.Context(), host, cfg)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, toJSONPortScanReport(rep))
+}
+
 func handleHistory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
@@ -1244,6 +1424,10 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 			if !session.start(req) {
 				_ = session.writer.WriteEvent(wsEvent{Type: "error", Error: "a run is already in progress"})
 			}
+		case "portscan":
+			if !session.start(req) {
+				_ = session.writer.WriteEvent(wsEvent{Type: "error", Error: "a run is already in progress"})
+			}
 		default:
 			_ = session.writer.WriteEvent(wsEvent{Type: "error", Error: "unknown type"})
 		}
@@ -1256,6 +1440,8 @@ func runWSRequest(ctx context.Context, writer *wsWriter, req wsRequest) error {
 		return streamPingWS(ctx, writer, req)
 	case "tcpping":
 		return streamTCPPingWS(ctx, writer, req)
+	case "portscan":
+		return streamPortScanWS(ctx, writer, req)
 	default:
 		return fmt.Errorf("unknown type")
 	}
@@ -1395,6 +1581,58 @@ func streamTCPPingWS(ctx context.Context, writer *wsWriter, req wsRequest) error
 	})
 }
 
+func streamPortScanWS(ctx context.Context, writer *wsWriter, req wsRequest) error {
+	release, ok := tryAcquireProbeSlot()
+	if !ok {
+		return writer.WriteEvent(wsEvent{Type: "error", Error: "server busy, try again"})
+	}
+	defer release()
+
+	timeout := defaultProbeTimeout
+	if req.TimeoutMs > 0 {
+		timeout = time.Duration(req.TimeoutMs) * time.Millisecond
+	}
+
+	host, _, cfg, err := normalizePortScanRequest(req.Host, req.Ports, timeout, req.Concurrency)
+	if err != nil {
+		return writer.WriteEvent(wsEvent{Type: "error", Error: err.Error()})
+	}
+
+	rep, err := portscan.RunStreamContext(ctx, host, cfg, func(res portscan.Result) error {
+		ts := time.Now()
+		jr := toJSONPortScanResult(res)
+		return writer.WriteEvent(wsEvent{
+			Type:     "result",
+			Protocol: "tcp-portscan",
+			Target:   host,
+			Ts:       ts.UnixMilli(),
+			Result:   &jr,
+		})
+	})
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			summary := toJSONPortScanSummary(rep.Summary)
+			return writer.WriteEvent(wsEvent{
+				Type:     "stopped",
+				Protocol: rep.Protocol,
+				Target:   rep.Target,
+				Addr:     rep.Addr,
+				Summary:  &summary,
+			})
+		}
+		return writer.WriteEvent(wsEvent{Type: "error", Error: err.Error()})
+	}
+
+	summary := toJSONPortScanSummary(rep.Summary)
+	return writer.WriteEvent(wsEvent{
+		Type:     "summary",
+		Protocol: rep.Protocol,
+		Target:   rep.Target,
+		Addr:     rep.Addr,
+		Summary:  &summary,
+	})
+}
+
 func tryAcquireProbeSlot() (func(), bool) {
 	select {
 	case probeLimiter <- struct{}{}:
@@ -1530,6 +1768,22 @@ func toJSONReport(rep report.Report) jsonReport {
 	return jr
 }
 
+func toJSONPortScanReport(rep portscan.Report) jsonReport {
+	jr := jsonReport{
+		Protocol: rep.Protocol,
+		Target:   rep.Target,
+		Addr:     rep.Addr,
+		Summary:  toJSONPortScanSummary(rep.Summary),
+	}
+
+	jr.Results = make([]jsonResult, 0, len(rep.Results))
+	for _, r := range rep.Results {
+		jr.Results = append(jr.Results, toJSONPortScanResult(r))
+	}
+
+	return jr
+}
+
 func toJSONSummary(s report.Summary) jsonSummary {
 	js := jsonSummary{
 		Sent: s.Sent,
@@ -1545,6 +1799,16 @@ func toJSONSummary(s report.Summary) jsonSummary {
 	return js
 }
 
+func toJSONPortScanSummary(s portscan.Summary) jsonSummary {
+	return jsonSummary{
+		Scanned:  s.Scanned,
+		Open:     s.Open,
+		Closed:   s.Closed,
+		Timeout:  s.Timeout,
+		Duration: s.Duration.Round(time.Millisecond).String(),
+	}
+}
+
 func toJSONResult(r report.Result) jsonResult {
 	jr := jsonResult{Seq: r.Seq}
 	if r.Error != "" {
@@ -1556,6 +1820,21 @@ func toJSONResult(r report.Result) jsonResult {
 	}
 	if r.Addr != "" {
 		jr.Addr = r.Addr
+	}
+	return jr
+}
+
+func toJSONPortScanResult(r portscan.Result) jsonResult {
+	jr := jsonResult{
+		Port:  r.Port,
+		State: r.State,
+		Error: r.Error,
+		Addr:  r.Addr,
+	}
+	if r.State == "open" {
+		jr.RTT = formatDuration(r.RTT)
+		ms := float64(r.RTT) / float64(time.Millisecond)
+		jr.RTTMs = &ms
 	}
 	return jr
 }

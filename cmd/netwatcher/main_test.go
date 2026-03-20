@@ -7,7 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -74,6 +74,36 @@ func TestNormalizeTCPPingRequestDefaultsAndBounds(t *testing.T) {
 	}
 	if _, _, _, err := normalizeTCPPingRequest("example.com", 70000, 1, time.Second, time.Second); err == nil {
 		t.Fatal("expected port validation error")
+	}
+}
+
+func TestNormalizePortScanRequestDefaultsAndBounds(t *testing.T) {
+	host, ports, cfg, err := normalizePortScanRequest("  example.com  ", "22,80,443", 0, 0)
+	if err != nil {
+		t.Fatalf("normalizePortScanRequest returned error: %v", err)
+	}
+
+	if host != "example.com" {
+		t.Fatalf("expected trimmed host, got %q", host)
+	}
+	if len(ports) != 3 {
+		t.Fatalf("expected 3 ports, got %d", len(ports))
+	}
+	if cfg.Timeout != defaultProbeTimeout {
+		t.Fatalf("expected default timeout %s, got %s", defaultProbeTimeout, cfg.Timeout)
+	}
+	if cfg.Concurrency != 3 {
+		t.Fatalf("expected concurrency capped to port count 3, got %d", cfg.Concurrency)
+	}
+
+	if _, _, _, err := normalizePortScanRequest("example.com", "", time.Second, 10); err == nil {
+		t.Fatal("expected ports validation error")
+	}
+	if _, _, _, err := normalizePortScanRequest("example.com", "1-5000", time.Second, 10); err == nil {
+		t.Fatal("expected max port count validation error")
+	}
+	if _, _, _, err := normalizePortScanRequest("example.com", "80,443", time.Second, maxScanConcurrency+1); err == nil {
+		t.Fatal("expected concurrency validation error")
 	}
 }
 
@@ -207,6 +237,21 @@ func TestHandleHistoryReturnsStoredPoints(t *testing.T) {
 	}
 	if points[0].Seq != 1 {
 		t.Fatalf("expected seq 1, got %d", points[0].Seq)
+	}
+}
+
+func TestHandlePortScanRejectsInvalidPayload(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/portscan", strings.NewReader(`{"host":"example.com","ports":"80-9000"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	handlePortScan(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "scan is limited") {
+		t.Fatalf("unexpected body: %s", rr.Body.String())
 	}
 }
 
@@ -378,6 +423,36 @@ func TestHandleWSRejectsInvalidPingRequest(t *testing.T) {
 	}
 }
 
+func TestHandleWSRejectsInvalidPortScanRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(handleWS))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	header := http.Header{}
+	header.Set("Origin", server.URL)
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteJSON(wsRequest{Type: "portscan", Host: "example.com", Ports: "1-9000"}); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	var evt wsEvent
+	if err := conn.ReadJSON(&evt); err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if evt.Type != "error" {
+		t.Fatalf("expected error event, got %q", evt.Type)
+	}
+	if !strings.Contains(evt.Error, "scan is limited") {
+		t.Fatalf("unexpected websocket error: %q", evt.Error)
+	}
+}
+
 func TestHandleWSRejectsWhenProbeLimiterFull(t *testing.T) {
 	fillProbeLimiter()
 	defer drainProbeLimiter()
@@ -493,9 +568,16 @@ func newTCPPingFlagSet() *flag.FlagSet {
 func openTestStore(t *testing.T) *store.Store {
 	t.Helper()
 
-	st, err := store.OpenWithConfig(filepath.Join(t.TempDir(), "test.db"), store.Config{
+	dsn := strings.TrimSpace(os.Getenv("NETWATCHER_TEST_POSTGRES_DSN"))
+	if dsn == "" {
+		t.Skip("NETWATCHER_TEST_POSTGRES_DSN is not set")
+	}
+
+	st, err := store.OpenConfigured(store.Config{
+		DSN:           dsn,
 		BatchSize:     1,
 		FlushInterval: 5 * time.Millisecond,
+		TableName:     testTableName(t.Name()),
 	})
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
@@ -537,4 +619,20 @@ func drainProbeLimiter() {
 			return
 		}
 	}
+}
+
+func testTableName(name string) string {
+	name = strings.ToLower(name)
+	var b strings.Builder
+	b.WriteString("test_")
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('_')
+	}
+	b.WriteString("_")
+	b.WriteString(fmt.Sprintf("%d", time.Now().UnixNano()))
+	return b.String()
 }

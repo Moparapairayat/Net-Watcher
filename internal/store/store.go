@@ -5,23 +5,21 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"strings"
+	"regexp"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
-	_ "modernc.org/sqlite"
 )
 
 const (
-	DriverSQLite   = "sqlite"
 	DriverPostgres = "postgres"
 )
 
+var identifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 type Config struct {
-	Driver           string
-	Path             string
 	DSN              string
 	BatchSize        int
 	FlushInterval    time.Duration
@@ -31,11 +29,12 @@ type Config struct {
 	MaxIdleConns     int
 	ConnMaxLifetime  time.Duration
 	RequireTimescale bool
+	TableName        string
 }
 
 type Store struct {
 	db        *sql.DB
-	driver    string
+	tableName string
 	insertCh  chan ResultRecord
 	done      chan struct{}
 	cfg       Config
@@ -67,30 +66,26 @@ func Open(path string) (*Store, error) {
 	return OpenWithConfig(path, Config{})
 }
 
-func OpenWithConfig(path string, cfg Config) (*Store, error) {
-	if cfg.Path == "" {
-		cfg.Path = path
-	}
-	if cfg.Driver == "" {
-		cfg.Driver = DriverSQLite
+func OpenWithConfig(dsn string, cfg Config) (*Store, error) {
+	if cfg.DSN == "" {
+		cfg.DSN = dsn
 	}
 	return OpenConfigured(cfg)
 }
 
 func OpenConfigured(cfg Config) (*Store, error) {
 	cfg = applyDefaults(cfg)
-
-	driver := normalizeDriver(cfg.Driver)
-	if driver == "" {
-		return nil, fmt.Errorf("unsupported db driver: %q", cfg.Driver)
+	tableName, err := normalizeIdentifier(cfg.TableName, "results")
+	if err != nil {
+		return nil, fmt.Errorf("invalid table name: %w", err)
 	}
 
-	db, err := openDB(driver, cfg)
+	db, err := openDB(cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := setupSchema(db, driver, cfg); err != nil {
+	if err := setupSchema(db, cfg, tableName); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -101,11 +96,11 @@ func OpenConfigured(cfg Config) (*Store, error) {
 	}
 
 	s := &Store{
-		db:       db,
-		driver:   driver,
-		insertCh: make(chan ResultRecord, chSize),
-		done:     make(chan struct{}),
-		cfg:      cfg,
+		db:        db,
+		tableName: tableName,
+		insertCh:  make(chan ResultRecord, chSize),
+		done:      make(chan struct{}),
+		cfg:       cfg,
 	}
 	s.wg.Add(1)
 	go s.worker()
@@ -130,7 +125,7 @@ func (s *Store) Driver() string {
 	if s == nil {
 		return ""
 	}
-	return s.driver
+	return DriverPostgres
 }
 
 func (s *Store) Ping(ctx context.Context) error {
@@ -308,171 +303,96 @@ func (s *Store) QueryHistory(protocol, target string, port int, limit int) ([]Hi
 }
 
 func (s *Store) deleteOlderThan(cutoff time.Time) error {
-	query := "DELETE FROM results WHERE ts < ?"
-	args := []any{cutoff.UnixMilli()}
-	if s.driver == DriverPostgres {
-		query = "DELETE FROM results WHERE ts < $1"
-		args = []any{cutoff.UTC()}
-	}
+	query := fmt.Sprintf("DELETE FROM %s WHERE ts < $1", s.tableRef())
+	args := []any{cutoff.UTC()}
 	_, err := s.db.Exec(query, args...)
 	return err
 }
 
 func (s *Store) insertStatement() string {
-	switch s.driver {
-	case DriverPostgres:
-		return `INSERT INTO results (ts, protocol, target, addr, port, seq, rtt_ms, error)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8);`
-	default:
-		return `INSERT INTO results (ts, protocol, target, addr, port, seq, rtt_ms, error)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?);`
-	}
+	return fmt.Sprintf(`INSERT INTO %s (ts, protocol, target, addr, port, seq, rtt_ms, error)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8);`, s.tableRef())
 }
 
 func (s *Store) queryHistorySQL(withPort bool) string {
-	switch s.driver {
-	case DriverPostgres:
-		query := `SELECT CAST(EXTRACT(EPOCH FROM ts) * 1000 AS BIGINT), seq, rtt_ms, error FROM results
-			WHERE protocol = $1 AND target = $2`
-		if withPort {
-			query += " AND port = $3"
-			query += " ORDER BY ts DESC LIMIT $4"
-		} else {
-			query += " ORDER BY ts DESC LIMIT $3"
-		}
-		return query
-	default:
-		query := `SELECT ts, seq, rtt_ms, error FROM results
-			WHERE protocol = ? AND target = ?`
-		if withPort {
-			query += " AND port = ?"
-		}
-		query += " ORDER BY ts DESC LIMIT ?"
-		return query
+	query := fmt.Sprintf(`SELECT CAST(EXTRACT(EPOCH FROM ts) * 1000 AS BIGINT), seq, rtt_ms, error FROM %s
+		WHERE protocol = $1 AND target = $2`, s.tableRef())
+	if withPort {
+		query += " AND port = $3"
+		query += " ORDER BY ts DESC LIMIT $4"
+	} else {
+		query += " ORDER BY ts DESC LIMIT $3"
 	}
+	return query
 }
 
 func (s *Store) normalizeTimestamp(ts time.Time) any {
-	if s.driver == DriverPostgres {
-		return ts.UTC()
-	}
-	return ts.UnixMilli()
+	return ts.UTC()
 }
 
-func openDB(driver string, cfg Config) (*sql.DB, error) {
-	switch driver {
-	case DriverSQLite:
-		if strings.TrimSpace(cfg.Path) == "" {
-			return nil, fmt.Errorf("sqlite path is required")
-		}
-		db, err := sql.Open("sqlite", cfg.Path)
-		if err != nil {
-			return nil, err
-		}
-		return db, nil
-	case DriverPostgres:
-		if strings.TrimSpace(cfg.DSN) == "" {
-			return nil, fmt.Errorf("postgres dsn is required")
-		}
-		db, err := sql.Open("pgx", cfg.DSN)
-		if err != nil {
-			return nil, err
-		}
-		if cfg.MaxOpenConns > 0 {
-			db.SetMaxOpenConns(cfg.MaxOpenConns)
-		}
-		if cfg.MaxIdleConns > 0 {
-			db.SetMaxIdleConns(cfg.MaxIdleConns)
-		}
-		if cfg.ConnMaxLifetime > 0 {
-			db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
-		}
-		return db, nil
-	default:
-		return nil, fmt.Errorf("unsupported db driver: %q", driver)
+func openDB(cfg Config) (*sql.DB, error) {
+	if cfg.DSN == "" {
+		return nil, fmt.Errorf("postgres dsn is required")
 	}
+	db, err := sql.Open("pgx", cfg.DSN)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.MaxOpenConns > 0 {
+		db.SetMaxOpenConns(cfg.MaxOpenConns)
+	}
+	if cfg.MaxIdleConns > 0 {
+		db.SetMaxIdleConns(cfg.MaxIdleConns)
+	}
+	if cfg.ConnMaxLifetime > 0 {
+		db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+	}
+	return db, nil
 }
 
-func setupSchema(db *sql.DB, driver string, cfg Config) error {
-	switch driver {
-	case DriverSQLite:
-		if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
-			return err
-		}
-		if _, err := db.Exec("PRAGMA synchronous=NORMAL;"); err != nil {
-			return err
-		}
-		if _, err := db.Exec(`
-			CREATE TABLE IF NOT EXISTS results (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				ts INTEGER NOT NULL,
-				protocol TEXT NOT NULL,
-				target TEXT NOT NULL,
-				addr TEXT,
-				port INTEGER,
-				seq INTEGER,
-				rtt_ms REAL,
-				error TEXT
-			);
-		`); err != nil {
-			return err
-		}
-		if _, err := db.Exec(`
-			CREATE INDEX IF NOT EXISTS idx_results_lookup
-			ON results(protocol, target, port, ts);
-		`); err != nil {
-			return err
-		}
-		return nil
-	case DriverPostgres:
-		if err := db.Ping(); err != nil {
-			return err
-		}
-		if cfg.RequireTimescale {
-			if _, err := db.Exec(`CREATE EXTENSION IF NOT EXISTS timescaledb;`); err != nil {
-				return fmt.Errorf("enable timescaledb extension: %w", err)
-			}
-		}
-		if _, err := db.Exec(`
-			CREATE TABLE IF NOT EXISTS results (
-				id BIGINT GENERATED BY DEFAULT AS IDENTITY,
-				ts TIMESTAMPTZ NOT NULL,
-				protocol TEXT NOT NULL,
-				target TEXT NOT NULL,
-				addr TEXT,
-				port INTEGER,
-				seq INTEGER,
-				rtt_ms DOUBLE PRECISION,
-				error TEXT,
-				PRIMARY KEY (ts, id)
-			);
-		`); err != nil {
-			return err
-		}
-		if _, err := db.Exec(`
-			CREATE INDEX IF NOT EXISTS idx_results_lookup
-			ON results(protocol, target, port, ts DESC);
-		`); err != nil {
-			return err
-		}
-		if cfg.RequireTimescale {
-			if _, err := db.Exec(`
-				SELECT create_hypertable('results', 'ts', if_not_exists => TRUE, migrate_data => TRUE);
-			`); err != nil {
-				return fmt.Errorf("create timescaledb hypertable: %w", err)
-			}
-		}
-		return nil
-	default:
-		return fmt.Errorf("unsupported db driver: %q", driver)
+func setupSchema(db *sql.DB, cfg Config, tableName string) error {
+	if err := db.Ping(); err != nil {
+		return err
 	}
+	if cfg.RequireTimescale {
+		if _, err := db.Exec(`CREATE EXTENSION IF NOT EXISTS timescaledb;`); err != nil {
+			return fmt.Errorf("enable timescaledb extension: %w", err)
+		}
+	}
+	if _, err := db.Exec(fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id BIGINT GENERATED BY DEFAULT AS IDENTITY,
+			ts TIMESTAMPTZ NOT NULL,
+			protocol TEXT NOT NULL,
+			target TEXT NOT NULL,
+			addr TEXT,
+			port INTEGER,
+			seq INTEGER,
+			rtt_ms DOUBLE PRECISION,
+			error TEXT,
+			PRIMARY KEY (ts, id)
+		);
+	`, quoteIdentifier(tableName))); err != nil {
+		return err
+	}
+	indexName := quoteIdentifier(fmt.Sprintf("idx_%s_lookup", tableName))
+	if _, err := db.Exec(fmt.Sprintf(`
+		CREATE INDEX IF NOT EXISTS %s
+		ON %s(protocol, target, port, ts DESC);
+	`, indexName, quoteIdentifier(tableName))); err != nil {
+		return err
+	}
+	if cfg.RequireTimescale {
+		if _, err := db.Exec(fmt.Sprintf(`
+			SELECT create_hypertable('%s', 'ts', if_not_exists => TRUE, migrate_data => TRUE);
+		`, tableName)); err != nil {
+			return fmt.Errorf("create timescaledb hypertable: %w", err)
+		}
+	}
+	return nil
 }
 
 func applyDefaults(cfg Config) Config {
-	cfg.Driver = normalizeDriver(cfg.Driver)
-	if cfg.Driver == "" {
-		cfg.Driver = DriverSQLite
-	}
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = 100
 	}
@@ -491,16 +411,26 @@ func applyDefaults(cfg Config) Config {
 	if cfg.ConnMaxLifetime <= 0 {
 		cfg.ConnMaxLifetime = 30 * time.Minute
 	}
+	if cfg.TableName == "" {
+		cfg.TableName = "results"
+	}
 	return cfg
 }
 
-func normalizeDriver(driver string) string {
-	switch strings.ToLower(strings.TrimSpace(driver)) {
-	case "", DriverSQLite:
-		return DriverSQLite
-	case "postgres", "postgresql", "timescaledb":
-		return DriverPostgres
-	default:
-		return ""
+func normalizeIdentifier(value string, fallback string) (string, error) {
+	if value == "" {
+		value = fallback
 	}
+	if !identifierPattern.MatchString(value) {
+		return "", fmt.Errorf("must match %s", identifierPattern.String())
+	}
+	return value, nil
+}
+
+func quoteIdentifier(value string) string {
+	return `"` + value + `"`
+}
+
+func (s *Store) tableRef() string {
+	return quoteIdentifier(s.tableName)
 }
