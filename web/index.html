@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NetWatcher</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <div class="watermark">MPA</div>
+  <div class="container">
+    <header class="hero">
+      <div class="brand">
+        <div class="logo">NW</div>
+        <div>
+          <h1 class="brand-name">
+            <span class="brand-net">Net</span>
+            <span class="brand-watcher">Watcher</span>
+          </h1>
+          <p>Network diagnostics in one clean cockpit.</p>
+        </div>
+      </div>
+      <div class="modes">
+        <button class="mode active" data-mode="ping">ICMP Ping</button>
+        <button class="mode" data-mode="tcpping">TCP Ping</button>
+      </div>
+    </header>
+
+    <main class="panel">
+      <section class="form">
+        <div class="field">
+          <label for="host">Target Host</label>
+          <input id="host" type="text" placeholder="example.com or 8.8.8.8" />
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label for="port">Port (TCP)</label>
+            <input id="port" type="number" min="1" max="65535" value="443" />
+          </div>
+          <div class="field">
+            <label for="count">Count</label>
+            <input id="count" type="number" min="1" max="50" value="4" />
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label for="interval">Interval (ms)</label>
+            <input id="interval" type="number" min="100" value="1000" />
+          </div>
+          <div class="field">
+            <label for="timeout">Timeout (ms)</label>
+            <input id="timeout" type="number" min="100" value="2000" />
+          </div>
+          <div class="field">
+            <label for="size">Payload Size</label>
+            <input id="size" type="number" min="8" value="32" />
+          </div>
+        </div>
+
+        <div class="row options">
+          <label class="checkbox">
+            <input id="ipv6" type="checkbox" />
+            <span>Force IPv6</span>
+          </label>
+          <div class="actions">
+            <button id="run" class="primary">Run Diagnostics</button>
+            <button id="stop" class="secondary" disabled>Stop</button>
+          </div>
+        </div>
+
+        <div id="hint" class="hint">ICMP ping may require admin/root permission.</div>
+      </section>
+
+      <section class="results">
+        <div class="results-header">
+          <h2>Results</h2>
+          <span id="status" class="status">Idle</span>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-head">
+            <h3>Latency (ms)</h3>
+            <span id="chart-label">Realtime</span>
+          </div>
+          <canvas id="chart"></canvas>
+        </div>
+
+        <div id="summary" class="summary"></div>
+        <div id="error" class="error hidden"></div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Seq</th>
+                <th>Status</th>
+                <th>RTT</th>
+                <th>Addr</th>
+              </tr>
+            </thead>
+            <tbody id="results"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span class="credit">Dev By MOPARA PAIR AYAT</span>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
