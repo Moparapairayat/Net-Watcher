@@ -13,10 +13,12 @@ func TestStoreInsertAndQueryHistoryOrder(t *testing.T) {
 		BatchSize:     1,
 		FlushInterval: 5 * time.Millisecond,
 	})
+	const userID int64 = 101
 
 	olderTs := time.Now().Add(-time.Minute)
 	newerTs := time.Now()
 	st.InsertAsync(ResultRecord{
+		UserID:   userID,
 		Ts:       olderTs,
 		Protocol: "ping",
 		Target:   "example.com",
@@ -25,6 +27,7 @@ func TestStoreInsertAndQueryHistoryOrder(t *testing.T) {
 		RttMs:    float64Ptr(10),
 	})
 	st.InsertAsync(ResultRecord{
+		UserID:   userID,
 		Ts:       newerTs,
 		Protocol: "ping",
 		Target:   "example.com",
@@ -36,7 +39,7 @@ func TestStoreInsertAndQueryHistoryOrder(t *testing.T) {
 	var points []HistoryPoint
 	waitFor(t, time.Second, func() bool {
 		var err error
-		points, err = st.QueryHistory("ping", "example.com", 0, 10)
+		points, err = st.QueryHistory(userID, "ping", "example.com", 0, 10)
 		return err == nil && len(points) == 2
 	})
 
@@ -55,8 +58,10 @@ func TestStoreRetentionCleanupRemovesExpiredRows(t *testing.T) {
 		Retention:       500 * time.Millisecond,
 		CleanupInterval: 25 * time.Millisecond,
 	})
+	const userID int64 = 202
 
 	st.InsertAsync(ResultRecord{
+		UserID:   userID,
 		Ts:       time.Now().Add(-time.Hour),
 		Protocol: "ping",
 		Target:   "cleanup.test",
@@ -64,6 +69,7 @@ func TestStoreRetentionCleanupRemovesExpiredRows(t *testing.T) {
 		RttMs:    float64Ptr(5),
 	})
 	st.InsertAsync(ResultRecord{
+		UserID:   userID,
 		Ts:       time.Now(),
 		Protocol: "ping",
 		Target:   "cleanup.test",
@@ -72,7 +78,7 @@ func TestStoreRetentionCleanupRemovesExpiredRows(t *testing.T) {
 	})
 
 	waitFor(t, 400*time.Millisecond, func() bool {
-		points, err := st.QueryHistory("ping", "cleanup.test", 0, 10)
+		points, err := st.QueryHistory(userID, "ping", "cleanup.test", 0, 10)
 		return err == nil && len(points) == 1 && points[0].Seq == 2
 	})
 }

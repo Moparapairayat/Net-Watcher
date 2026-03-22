@@ -1,19 +1,24 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/bcrypt"
 
+	"netwatcher/internal/mailer"
 	"netwatcher/internal/store"
 )
 
@@ -132,8 +137,10 @@ func TestNormalizeArgsMovesValueFlagsAheadOfPositionals(t *testing.T) {
 }
 
 func TestHandlePingRejectsInvalidPayload(t *testing.T) {
+	st := installTestStore(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/ping", strings.NewReader(`{"host":"example.com","count":101}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(issueTestSessionCookie(t, st))
 	rr := httptest.NewRecorder()
 
 	handlePing(rr, req)
@@ -151,11 +158,456 @@ func TestHandlePingRejectsInvalidPayload(t *testing.T) {
 	}
 }
 
+func TestHandleAuthSessionReturnsUnauthenticatedWithoutCookie(t *testing.T) {
+	installTestStore(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/session", nil)
+	rr := httptest.NewRecorder()
+
+	handleAuthSession(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	var resp authSessionResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Authenticated {
+		t.Fatal("expected unauthenticated session response")
+	}
+}
+
+func TestAuthSignupLoginLogoutFlow(t *testing.T) {
+	installTestStore(t)
+	resetAuthRateLimiterForTest(t)
+
+	email := fmt.Sprintf("auth_%d@example.com", time.Now().UnixNano())
+	password := "S3curePass!"
+	signupBody := fmt.Sprintf(`{"name":"Test User","email":"%s","password":"%s"}`, email, password)
+	signupReq := httptest.NewRequest(http.MethodPost, "/api/auth/signup", strings.NewReader(signupBody))
+	signupReq.Header.Set("Content-Type", "application/json")
+	signupRR := httptest.NewRecorder()
+
+	handleAuthSignup(signupRR, signupReq)
+
+	if signupRR.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", signupRR.Code, signupRR.Body.String())
+	}
+	var signupResp authMessageResponse
+	if err := json.Unmarshal(signupRR.Body.Bytes(), &signupResp); err != nil {
+		t.Fatalf("failed to decode signup response: %v", err)
+	}
+	if !signupResp.VerificationRequired || signupResp.Email != email || signupResp.PreviewCode == "" {
+		t.Fatalf("unexpected signup response: %#v", signupResp)
+	}
+
+	loginBeforeVerifyReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(fmt.Sprintf(`{"email":"%s","password":"%s"}`, email, password)))
+	loginBeforeVerifyReq.Header.Set("Content-Type", "application/json")
+	loginBeforeVerifyRR := httptest.NewRecorder()
+	handleAuthLogin(loginBeforeVerifyRR, loginBeforeVerifyReq)
+	if loginBeforeVerifyRR.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 before email verification, got %d: %s", loginBeforeVerifyRR.Code, loginBeforeVerifyRR.Body.String())
+	}
+	var loginBeforeVerifyResp authMessageResponse
+	if err := json.Unmarshal(loginBeforeVerifyRR.Body.Bytes(), &loginBeforeVerifyResp); err != nil {
+		t.Fatalf("failed to decode pre-verification login response: %v", err)
+	}
+	if !loginBeforeVerifyResp.VerificationRequired || loginBeforeVerifyResp.Email != email {
+		t.Fatalf("unexpected pre-verification login response: %#v", loginBeforeVerifyResp)
+	}
+
+	resendReq := httptest.NewRequest(http.MethodPost, "/api/auth/resend-verification", strings.NewReader(fmt.Sprintf(`{"email":"%s"}`, email)))
+	resendReq.Header.Set("Content-Type", "application/json")
+	resendRR := httptest.NewRecorder()
+	handleAuthResendVerification(resendRR, resendReq)
+	if resendRR.Code != http.StatusOK {
+		t.Fatalf("expected 200 from resend verification, got %d: %s", resendRR.Code, resendRR.Body.String())
+	}
+	var resendResp authMessageResponse
+	if err := json.Unmarshal(resendRR.Body.Bytes(), &resendResp); err != nil {
+		t.Fatalf("failed to decode resend verification response: %v", err)
+	}
+	if resendResp.Email != email || !strings.Contains(strings.ToLower(resendResp.Message), "still active") {
+		t.Fatalf("unexpected resend verification response: %#v", resendResp)
+	}
+
+	verifyBody := fmt.Sprintf(`{"email":"%s","code":"%s"}`, email, signupResp.PreviewCode)
+	verifyReq := httptest.NewRequest(http.MethodPost, "/api/auth/verify-email", strings.NewReader(verifyBody))
+	verifyReq.Header.Set("Content-Type", "application/json")
+	verifyRR := httptest.NewRecorder()
+	handleAuthVerifyEmail(verifyRR, verifyReq)
+	if verifyRR.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", verifyRR.Code, verifyRR.Body.String())
+	}
+	verifyCookie := extractAuthCookie(t, verifyRR.Result())
+
+	loginBody := fmt.Sprintf(`{"email":"%s","password":"%s"}`, email, password)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(loginBody))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginRR := httptest.NewRecorder()
+	handleAuthLogin(loginRR, loginReq)
+	if loginRR.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", loginRR.Code, loginRR.Body.String())
+	}
+	loginCookie := extractAuthCookie(t, loginRR.Result())
+
+	sessionReq := httptest.NewRequest(http.MethodGet, "/api/auth/session", nil)
+	sessionReq.AddCookie(verifyCookie)
+	sessionRR := httptest.NewRecorder()
+	handleAuthSession(sessionRR, sessionReq)
+	if sessionRR.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", sessionRR.Code)
+	}
+
+	protectedReq := httptest.NewRequest(http.MethodPost, "/api/ping", strings.NewReader(`{"host":"example.com"}`))
+	protectedReq.Header.Set("Content-Type", "application/json")
+	protectedReq.AddCookie(loginCookie)
+	protectedRR := httptest.NewRecorder()
+	handlePing(protectedRR, protectedReq)
+	if protectedRR.Code == http.StatusUnauthorized {
+		t.Fatal("expected authenticated request to pass auth gate")
+	}
+
+	unauthReq := httptest.NewRequest(http.MethodPost, "/api/ping", strings.NewReader(`{"host":"example.com"}`))
+	unauthReq.Header.Set("Content-Type", "application/json")
+	unauthRR := httptest.NewRecorder()
+	handlePing(unauthRR, unauthReq)
+	if unauthRR.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", unauthRR.Code)
+	}
+}
+
+func TestAuthForgotAndResetPasswordFlow(t *testing.T) {
+	st := installTestStore(t)
+	resetAuthRateLimiterForTest(t)
+
+	email := fmt.Sprintf("reset_%d@example.com", time.Now().UnixNano())
+	password := "S3curePass!"
+	newPassword := "An0therPass!"
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	if _, err := st.CreateUser(ctx, "Reset User", email, string(hash), false); err != nil {
+		t.Fatalf("create verified user: %v", err)
+	}
+
+	forgotReq := httptest.NewRequest(http.MethodPost, "/api/auth/forgot-password", strings.NewReader(fmt.Sprintf(`{"email":"%s"}`, email)))
+	forgotReq.Host = "127.0.0.1:8080"
+	forgotReq.Header.Set("Content-Type", "application/json")
+	forgotRR := httptest.NewRecorder()
+	handleAuthForgotPassword(forgotRR, forgotReq)
+	if forgotRR.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", forgotRR.Code, forgotRR.Body.String())
+	}
+
+	var forgotResp authMessageResponse
+	if err := json.Unmarshal(forgotRR.Body.Bytes(), &forgotResp); err != nil {
+		t.Fatalf("decode forgot response: %v", err)
+	}
+	if forgotResp.PreviewURL == "" {
+		t.Fatal("expected preview reset URL for local host")
+	}
+	resetURL, err := url.Parse(forgotResp.PreviewURL)
+	if err != nil {
+		t.Fatalf("parse preview URL: %v", err)
+	}
+	token := resetURL.Query().Get("token")
+	if token == "" {
+		t.Fatal("expected reset token in preview URL")
+	}
+
+	resetReq := httptest.NewRequest(http.MethodPost, "/api/auth/reset-password", strings.NewReader(fmt.Sprintf(`{"token":"%s","password":"%s"}`, token, newPassword)))
+	resetReq.Header.Set("Content-Type", "application/json")
+	resetRR := httptest.NewRecorder()
+	handleAuthResetPassword(resetRR, resetReq)
+	if resetRR.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resetRR.Code, resetRR.Body.String())
+	}
+
+	oldLoginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(fmt.Sprintf(`{"email":"%s","password":"%s"}`, email, password)))
+	oldLoginReq.Header.Set("Content-Type", "application/json")
+	oldLoginRR := httptest.NewRecorder()
+	handleAuthLogin(oldLoginRR, oldLoginReq)
+	if oldLoginRR.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for old password, got %d", oldLoginRR.Code)
+	}
+
+	newLoginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(fmt.Sprintf(`{"email":"%s","password":"%s"}`, email, newPassword)))
+	newLoginReq.Header.Set("Content-Type", "application/json")
+	newLoginRR := httptest.NewRecorder()
+	handleAuthLogin(newLoginRR, newLoginReq)
+	if newLoginRR.Code != http.StatusOK {
+		t.Fatalf("expected 200 for new password, got %d: %s", newLoginRR.Code, newLoginRR.Body.String())
+	}
+}
+
+func TestHandleAuthLoginRateLimited(t *testing.T) {
+	st := installTestStore(t)
+	resetAuthRateLimiterForTest(t)
+
+	email := fmt.Sprintf("loginlimit_%d@example.com", time.Now().UnixNano())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	hash, err := bcrypt.GenerateFromPassword([]byte("CorrectHorseBatteryStaple"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	if _, err := st.CreateUser(ctx, "Rate Limited User", email, string(hash), false); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	body := fmt.Sprintf(`{"email":"%s","password":"wrong-password"}`, email)
+	for attempt := 1; attempt <= 8; attempt++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		handleAuthLogin(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: expected 401, got %d: %s", attempt, rr.Code, rr.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handleAuthLogin(rr, req)
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleAuthResendVerificationUsesCooldown(t *testing.T) {
+	st := installTestStore(t)
+	resetAuthRateLimiterForTest(t)
+
+	email := fmt.Sprintf("verifycooldown_%d@example.com", time.Now().UnixNano())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	user, err := st.CreateUser(ctx, "Pending User", email, "test-password-hash", true)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := st.CreateEmailVerificationCode(ctx, user.ID, hashOpaqueToken("123456"), time.Now().Add(defaultVerifyCodeTTL)); err != nil {
+		t.Fatalf("seed verification code: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/resend-verification", strings.NewReader(fmt.Sprintf(`{"email":"%s"}`, email)))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handleAuthResendVerification(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp authMessageResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(resp.Message), "still active") {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+}
+
+func TestPrepareVerificationChallengeCleansUpCodeWhenEmailSendFails(t *testing.T) {
+	st := installTestStore(t)
+	installFailingTestMailer(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	user, err := st.CreateUser(ctx, "Mailer Failure User", fmt.Sprintf("verify_fail_%d@example.com", time.Now().UnixNano()), "hash", true)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/signup", nil)
+	resp, err := prepareVerificationChallenge(ctx, req, user)
+	if err != nil {
+		t.Fatalf("prepareVerificationChallenge returned error: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(resp.Message), "email delivery failed") {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+
+	recent, err := st.HasRecentEmailVerificationCode(ctx, user.ID, time.Now().Add(-defaultVerifyCodeTTL))
+	if err != nil {
+		t.Fatalf("HasRecentEmailVerificationCode returned error: %v", err)
+	}
+	if recent {
+		t.Fatal("expected verification code to be cleaned up after send failure")
+	}
+}
+
+func TestHandleAuthForgotPasswordCleansUpTokenWhenEmailSendFails(t *testing.T) {
+	st := installTestStore(t)
+	installFailingTestMailer(t)
+	resetAuthRateLimiterForTest(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	email := fmt.Sprintf("reset_fail_%d@example.com", time.Now().UnixNano())
+	hash, err := bcrypt.GenerateFromPassword([]byte("CorrectHorseBatteryStaple"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	user, err := st.CreateUser(ctx, "Reset Failure User", email, string(hash), false)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/forgot-password", strings.NewReader(fmt.Sprintf(`{"email":"%s"}`, email)))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handleAuthForgotPassword(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	recent, err := st.HasRecentPasswordResetToken(ctx, user.ID, time.Now().Add(-defaultResetTTL))
+	if err != nil {
+		t.Fatalf("HasRecentPasswordResetToken returned error: %v", err)
+	}
+	if recent {
+		t.Fatal("expected password reset token to be cleaned up after send failure")
+	}
+}
+
+func TestRateLimiterSweepPrunesStaleBuckets(t *testing.T) {
+	rl := newRateLimiter()
+	old := time.Now().Add(-(rateLimitBucketTTL + time.Minute))
+	rl.buckets["stale"] = &rateLimitBucket{
+		hits:     []time.Time{old},
+		lastSeen: old,
+	}
+	rl.lastSweep = old
+
+	allowed, retryAfter := rl.Allow("fresh", rateLimitConfig{Limit: 2, Window: time.Minute})
+	if !allowed || retryAfter != 0 {
+		t.Fatalf("expected fresh request to be allowed, got allowed=%v retryAfter=%s", allowed, retryAfter)
+	}
+	if _, ok := rl.buckets["stale"]; ok {
+		t.Fatal("expected stale bucket to be pruned during sweep")
+	}
+}
+
+func TestAlertRulesCRUDFlow(t *testing.T) {
+	st := installTestStore(t)
+	cookie := issueTestSessionCookie(t, st)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/alerts/rules", strings.NewReader(`{
+		"name":"Latency guard",
+		"protocol":"ping",
+		"target":"example.com",
+		"latency_threshold_ms":200,
+		"consecutive_breaches":2,
+		"cooldown_minutes":15
+	}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.AddCookie(cookie)
+	createRR := httptest.NewRecorder()
+	handleAlertRules(createRR, createReq)
+	if createRR.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", createRR.Code, createRR.Body.String())
+	}
+
+	var created store.AlertRule
+	if err := json.Unmarshal(createRR.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created rule: %v", err)
+	}
+	if created.ID == 0 || created.Protocol != "ping" || created.Target != "example.com" {
+		t.Fatalf("unexpected created rule: %#v", created)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/alerts/rules", nil)
+	listReq.AddCookie(cookie)
+	listRR := httptest.NewRecorder()
+	handleAlertRules(listRR, listReq)
+	if listRR.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", listRR.Code, listRR.Body.String())
+	}
+
+	var rules []store.AlertRule
+	if err := json.Unmarshal(listRR.Body.Bytes(), &rules); err != nil {
+		t.Fatalf("decode rules: %v", err)
+	}
+	if len(rules) != 1 || rules[0].ID != created.ID {
+		t.Fatalf("unexpected rules: %#v", rules)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/alerts/rules?id=%d", created.ID), nil)
+	deleteReq.AddCookie(cookie)
+	deleteRR := httptest.NewRecorder()
+	handleAlertRules(deleteRR, deleteReq)
+	if deleteRR.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", deleteRR.Code, deleteRR.Body.String())
+	}
+}
+
+func TestBuildDashboardURLUsesPanel(t *testing.T) {
+	oldBase := appPublicBaseURL
+	appPublicBaseURL = "https://netwatcher.example.com"
+	t.Cleanup(func() {
+		appPublicBaseURL = oldBase
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/", nil)
+	got := buildDashboardURL(req, "alerts")
+	want := "https://netwatcher.example.com/?panel=alerts"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestNewStaticHandlerServesIndexForAuthRoutes(t *testing.T) {
+	staticDir := t.TempDir()
+	indexBody := "<!doctype html><title>NetWatcher</title>"
+	if err := os.WriteFile(filepath.Join(staticDir, "index.html"), []byte(indexBody), 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staticDir, "styles.css"), []byte("body{}"), 0o644); err != nil {
+		t.Fatalf("write asset: %v", err)
+	}
+
+	handler := newStaticHandler(staticDir)
+
+	for _, path := range []string{"/", "/login", "/signup", "/verify-email", "/forgot-password", "/reset-password"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d", path, rr.Code)
+		}
+		if !strings.Contains(rr.Body.String(), "NetWatcher") {
+			t.Fatalf("%s: expected index body, got %q", path, rr.Body.String())
+		}
+	}
+
+	assetReq := httptest.NewRequest(http.MethodGet, "/styles.css", nil)
+	assetRR := httptest.NewRecorder()
+	handler.ServeHTTP(assetRR, assetReq)
+	if assetRR.Code != http.StatusOK {
+		t.Fatalf("asset: expected 200, got %d", assetRR.Code)
+	}
+	if assetRR.Body.String() != "body{}" {
+		t.Fatalf("asset: unexpected body %q", assetRR.Body.String())
+	}
+}
+
 func TestHandlePingRejectsForbiddenOrigin(t *testing.T) {
+	st := installTestStore(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/ping", strings.NewReader(`{"host":"example.com"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "http://evil.example")
 	req.Host = "127.0.0.1:8080"
+	req.AddCookie(issueTestSessionCookie(t, st))
 	rr := httptest.NewRecorder()
 
 	handlePing(rr, req)
@@ -166,9 +618,11 @@ func TestHandlePingRejectsForbiddenOrigin(t *testing.T) {
 }
 
 func TestHandlePingRejectsOversizedBody(t *testing.T) {
+	st := installTestStore(t)
 	host := strings.Repeat("a", maxJSONBodyBytes)
 	req := httptest.NewRequest(http.MethodPost, "/api/ping", strings.NewReader(`{"host":"`+host+`"}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(issueTestSessionCookie(t, st))
 	rr := httptest.NewRecorder()
 
 	handlePing(rr, req)
@@ -182,8 +636,10 @@ func TestHandlePingRejectsOversizedBody(t *testing.T) {
 }
 
 func TestHandlePingRejectsTrailingJSON(t *testing.T) {
+	st := installTestStore(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/ping", strings.NewReader(`{"host":"example.com"}{"extra":true}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(issueTestSessionCookie(t, st))
 	rr := httptest.NewRecorder()
 
 	handlePing(rr, req)
@@ -197,15 +653,12 @@ func TestHandlePingRejectsTrailingJSON(t *testing.T) {
 }
 
 func TestHandleHistoryReturnsStoredPoints(t *testing.T) {
-	st := openTestStore(t)
-	oldStore := appStore
-	appStore = st
-	t.Cleanup(func() {
-		appStore = oldStore
-	})
+	st := installTestStore(t)
+	user, cookie := issueTestSession(t, st)
 
 	now := time.Now()
 	st.InsertAsync(store.ResultRecord{
+		UserID:   user.ID,
 		Ts:       now,
 		Protocol: "ping",
 		Target:   "example.com",
@@ -215,11 +668,12 @@ func TestHandleHistoryReturnsStoredPoints(t *testing.T) {
 	})
 
 	waitFor(t, time.Second, func() bool {
-		points, err := st.QueryHistory("ping", "example.com", 0, 10)
+		points, err := st.QueryHistory(user.ID, "ping", "example.com", 0, 10)
 		return err == nil && len(points) == 1
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/history?type=ping&host=example.com&limit=10", nil)
+	req.AddCookie(cookie)
 	rr := httptest.NewRecorder()
 
 	handleHistory(rr, req)
@@ -240,9 +694,48 @@ func TestHandleHistoryReturnsStoredPoints(t *testing.T) {
 	}
 }
 
+func TestHandleHistoryIsUserScoped(t *testing.T) {
+	st := installTestStore(t)
+	userA, _ := issueTestSession(t, st)
+	_, cookieB := issueTestSession(t, st)
+
+	st.InsertAsync(store.ResultRecord{
+		UserID:   userA.ID,
+		Ts:       time.Now(),
+		Protocol: "ping",
+		Target:   "example.com",
+		Addr:     "93.184.216.34",
+		Seq:      1,
+		RttMs:    float64Ptr(8.5),
+	})
+
+	waitFor(t, time.Second, func() bool {
+		points, err := st.QueryHistory(userA.ID, "ping", "example.com", 0, 10)
+		return err == nil && len(points) == 1
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/history?type=ping&host=example.com&limit=10", nil)
+	req.AddCookie(cookieB)
+	rr := httptest.NewRecorder()
+	handleHistory(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var points []store.HistoryPoint
+	if err := json.Unmarshal(rr.Body.Bytes(), &points); err != nil {
+		t.Fatalf("decode history response: %v", err)
+	}
+	if len(points) != 0 {
+		t.Fatalf("expected no cross-user history leakage, got %d point(s)", len(points))
+	}
+}
+
 func TestHandlePortScanRejectsInvalidPayload(t *testing.T) {
+	st := installTestStore(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/portscan", strings.NewReader(`{"host":"example.com","ports":"80-9000"}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(issueTestSessionCookie(t, st))
 	rr := httptest.NewRecorder()
 
 	handlePortScan(rr, req)
@@ -256,15 +749,12 @@ func TestHandlePortScanRejectsInvalidPayload(t *testing.T) {
 }
 
 func TestHandleHistoryNormalizesTCPHostPort(t *testing.T) {
-	st := openTestStore(t)
-	oldStore := appStore
-	appStore = st
-	t.Cleanup(func() {
-		appStore = oldStore
-	})
+	st := installTestStore(t)
+	user, cookie := issueTestSession(t, st)
 
 	now := time.Now()
 	st.InsertAsync(store.ResultRecord{
+		UserID:   user.ID,
 		Ts:       now,
 		Protocol: "tcpping",
 		Target:   "example.com",
@@ -275,11 +765,12 @@ func TestHandleHistoryNormalizesTCPHostPort(t *testing.T) {
 	})
 
 	waitFor(t, time.Second, func() bool {
-		points, err := st.QueryHistory("tcpping", "example.com", 443, 10)
+		points, err := st.QueryHistory(user.ID, "tcpping", "example.com", 443, 10)
 		return err == nil && len(points) == 1
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/history?type=tcpping&host=example.com:443&limit=10", nil)
+	req.AddCookie(cookie)
 	rr := httptest.NewRecorder()
 
 	handleHistory(rr, req)
@@ -298,14 +789,10 @@ func TestHandleHistoryNormalizesTCPHostPort(t *testing.T) {
 }
 
 func TestHandleHistoryRejectsInvalidLimit(t *testing.T) {
-	st := openTestStore(t)
-	oldStore := appStore
-	appStore = st
-	t.Cleanup(func() {
-		appStore = oldStore
-	})
+	st := installTestStore(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/history?type=ping&host=example.com&limit=5000", nil)
+	req.AddCookie(issueTestSessionCookie(t, st))
 	rr := httptest.NewRecorder()
 
 	handleHistory(rr, req)
@@ -315,6 +802,48 @@ func TestHandleHistoryRejectsInvalidLimit(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "limit must be") {
 		t.Fatalf("unexpected body: %s", rr.Body.String())
+	}
+}
+
+func TestHandleHistoryExportRequiresPostAndIsUserScoped(t *testing.T) {
+	st := installTestStore(t)
+	userA, cookieA := issueTestSession(t, st)
+	_, cookieB := issueTestSession(t, st)
+
+	st.InsertAsync(store.ResultRecord{
+		UserID:   userA.ID,
+		Ts:       time.Now(),
+		Protocol: "ping",
+		Target:   "example.com",
+		Addr:     "93.184.216.34",
+		Seq:      1,
+		RttMs:    float64Ptr(15.5),
+	})
+
+	waitFor(t, time.Second, func() bool {
+		points, err := st.QueryHistory(userA.ID, "ping", "example.com", 0, 10)
+		return err == nil && len(points) == 1
+	})
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/export/history", nil)
+	getReq.AddCookie(cookieA)
+	getRR := httptest.NewRecorder()
+	handleHistoryExport(getRR, getReq)
+	if getRR.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", getRR.Code)
+	}
+
+	postReq := httptest.NewRequest(http.MethodPost, "/api/export/history", strings.NewReader(`{"type":"ping","host":"example.com","limit":10,"format":"json"}`))
+	postReq.Header.Set("Content-Type", "application/json")
+	postReq.AddCookie(cookieB)
+	postRR := httptest.NewRecorder()
+	handleHistoryExport(postRR, postReq)
+
+	if postRR.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", postRR.Code, postRR.Body.String())
+	}
+	if got := strings.TrimSpace(postRR.Body.String()); got != "[]" {
+		t.Fatalf("expected empty export for other user, got %s", got)
 	}
 }
 
@@ -329,12 +858,8 @@ func TestHistoryCSVRowsIncludesHeader(t *testing.T) {
 }
 
 func TestHandleTCPPingStoresPerProbeTimestamps(t *testing.T) {
-	st := openTestStore(t)
-	oldStore := appStore
-	appStore = st
-	t.Cleanup(func() {
-		appStore = oldStore
-	})
+	st := installTestStore(t)
+	user, cookie := issueTestSession(t, st)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -358,6 +883,7 @@ func TestHandleTCPPingStoresPerProbeTimestamps(t *testing.T) {
 	body := fmt.Sprintf(`{"host":"127.0.0.1","port":%d,"count":2,"interval_ms":120,"timeout_ms":500}`, port)
 	req := httptest.NewRequest(http.MethodPost, "/api/tcpping", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
 	rr := httptest.NewRecorder()
 
 	handleTCPPing(rr, req)
@@ -369,7 +895,7 @@ func TestHandleTCPPingStoresPerProbeTimestamps(t *testing.T) {
 	var points []store.HistoryPoint
 	waitFor(t, 2*time.Second, func() bool {
 		var err error
-		points, err = st.QueryHistory("tcpping", "127.0.0.1", port, 10)
+		points, err = st.QueryHistory(user.ID, "tcpping", "127.0.0.1", port, 10)
 		return err == nil && len(points) == 2
 	})
 
@@ -394,12 +920,16 @@ func TestIsAllowedWSOriginAcceptsSameHostAndRejectsDifferentHost(t *testing.T) {
 }
 
 func TestHandleWSRejectsInvalidPingRequest(t *testing.T) {
+	st := installTestStore(t)
+	cookie := issueTestSessionCookie(t, st)
+
 	server := httptest.NewServer(http.HandlerFunc(handleWS))
 	defer server.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
 	header := http.Header{}
 	header.Set("Origin", server.URL)
+	header.Add("Cookie", cookie.Name+"="+cookie.Value)
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, header)
 	if err != nil {
@@ -424,12 +954,16 @@ func TestHandleWSRejectsInvalidPingRequest(t *testing.T) {
 }
 
 func TestHandleWSRejectsInvalidPortScanRequest(t *testing.T) {
+	st := installTestStore(t)
+	cookie := issueTestSessionCookie(t, st)
+
 	server := httptest.NewServer(http.HandlerFunc(handleWS))
 	defer server.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
 	header := http.Header{}
 	header.Set("Origin", server.URL)
+	header.Add("Cookie", cookie.Name+"="+cookie.Value)
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, header)
 	if err != nil {
@@ -456,6 +990,8 @@ func TestHandleWSRejectsInvalidPortScanRequest(t *testing.T) {
 func TestHandleWSRejectsWhenProbeLimiterFull(t *testing.T) {
 	fillProbeLimiter()
 	defer drainProbeLimiter()
+	st := installTestStore(t)
+	cookie := issueTestSessionCookie(t, st)
 
 	server := httptest.NewServer(http.HandlerFunc(handleWS))
 	defer server.Close()
@@ -463,6 +999,7 @@ func TestHandleWSRejectsWhenProbeLimiterFull(t *testing.T) {
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
 	header := http.Header{}
 	header.Set("Origin", server.URL)
+	header.Add("Cookie", cookie.Name+"="+cookie.Value)
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, header)
 	if err != nil {
@@ -484,6 +1021,9 @@ func TestHandleWSRejectsWhenProbeLimiterFull(t *testing.T) {
 }
 
 func TestHandleWSStopCancelsActiveRun(t *testing.T) {
+	st := installTestStore(t)
+	cookie := issueTestSessionCookie(t, st)
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen failed: %v", err)
@@ -508,6 +1048,7 @@ func TestHandleWSStopCancelsActiveRun(t *testing.T) {
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
 	header := http.Header{}
 	header.Set("Origin", server.URL)
+	header.Add("Cookie", cookie.Name+"="+cookie.Value)
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, header)
 	if err != nil {
@@ -588,6 +1129,89 @@ func openTestStore(t *testing.T) *store.Store {
 	return st
 }
 
+func installTestStore(t *testing.T) *store.Store {
+	t.Helper()
+
+	st := openTestStore(t)
+	oldStore := appStore
+	oldCache := appCache
+	oldObjectStore := appObjectStore
+	appStore = st
+	appCache = nil
+	appObjectStore = nil
+	t.Cleanup(func() {
+		appStore = oldStore
+		appCache = oldCache
+		appObjectStore = oldObjectStore
+	})
+	return st
+}
+
+func installFailingTestMailer(t *testing.T) {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message":"mailer unavailable"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := mailer.Open(mailer.Config{
+		APIKey:   "test-key",
+		From:     "NetWatcher <alerts@example.com>",
+		ReplyTo:  "support@example.com",
+		Endpoint: srv.URL,
+		Timeout:  5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("open test mailer: %v", err)
+	}
+
+	previous := appMailer
+	appMailer = client
+	t.Cleanup(func() {
+		appMailer = previous
+	})
+}
+
+func issueTestSessionCookie(t *testing.T, st *store.Store) *http.Cookie {
+	t.Helper()
+	_, cookie := issueTestSession(t, st)
+	return cookie
+}
+
+func issueTestSession(t *testing.T, st *store.Store) (store.User, *http.Cookie) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	email := fmt.Sprintf("session_%d@example.com", time.Now().UnixNano())
+	user, err := st.CreateUser(ctx, "Session Test User", email, "test-password-hash", false)
+	if err != nil {
+		t.Fatalf("create session test user: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1", nil)
+	rr := httptest.NewRecorder()
+	if err := issueSession(rr, req, ctx, user); err != nil {
+		t.Fatalf("issue session: %v", err)
+	}
+
+	return user, extractAuthCookie(t, rr.Result())
+}
+
+func resetAuthRateLimiterForTest(t *testing.T) {
+	t.Helper()
+
+	previous := authRateLimiter
+	authRateLimiter = newRateLimiter()
+	t.Cleanup(func() {
+		authRateLimiter = previous
+	})
+}
+
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()
 
@@ -619,6 +1243,18 @@ func drainProbeLimiter() {
 			return
 		}
 	}
+}
+
+func extractAuthCookie(t *testing.T, resp *http.Response) *http.Cookie {
+	t.Helper()
+
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == authCookieName {
+			return cookie
+		}
+	}
+	t.Fatal("expected auth cookie")
+	return nil
 }
 
 func testTableName(name string) string {

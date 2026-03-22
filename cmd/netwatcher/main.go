@@ -2,17 +2,24 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,8 +28,10 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/bcrypt"
 
 	"netwatcher/internal/cache"
+	"netwatcher/internal/mailer"
 	"netwatcher/internal/objectstore"
 	"netwatcher/internal/ping"
 	"netwatcher/internal/portscan"
@@ -56,6 +65,18 @@ const (
 	maxHostLength        = 255
 	maxHistoryLimit      = 1000
 	maxConcurrentProbes  = 8
+	authCookieName       = "netwatcher_session"
+	defaultSessionTTL    = 30 * 24 * time.Hour
+	defaultResetTTL      = 30 * time.Minute
+	defaultVerifyCodeTTL = 10 * time.Minute
+	verifyResendCooldown = 60 * time.Second
+	resetIssueCooldown   = 60 * time.Second
+	rateLimitSweepEvery  = 5 * time.Minute
+	rateLimitBucketTTL   = 30 * time.Minute
+	maxRateLimitBuckets  = 8192
+	minPasswordLength    = 8
+	maxPasswordLength    = 72
+	maxNameLength        = 80
 )
 
 type boolFlag interface {
@@ -275,6 +296,10 @@ func runServe(args []string) {
 	s3Region := fs.String("s3-region", envString("NETWATCHER_S3_REGION", "us-east-1"), "S3 region")
 	s3Prefix := fs.String("s3-prefix", envString("NETWATCHER_S3_PREFIX", "netwatcher"), "S3 object prefix")
 	s3UseSSL := fs.Bool("s3-ssl", envBool("NETWATCHER_S3_SSL", false), "use TLS for S3-compatible endpoint")
+	resendAPIKey := fs.String("resend-api-key", envString("NETWATCHER_RESEND_API_KEY", ""), "Resend API key for transactional email")
+	emailFrom := fs.String("email-from", envString("NETWATCHER_EMAIL_FROM", ""), "from address for transactional emails")
+	emailReplyTo := fs.String("email-reply-to", envString("NETWATCHER_EMAIL_REPLY_TO", ""), "reply-to address for transactional emails")
+	publicBaseURL := fs.String("public-base-url", envString("NETWATCHER_PUBLIC_BASE_URL", ""), "public base URL used in emails, for example https://netwatcher.example.com")
 
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: netwatcher serve [flags]")
@@ -289,6 +314,8 @@ func runServe(args []string) {
 		appStore = nil
 		appCache = nil
 		appObjectStore = nil
+		appMailer = nil
+		appPublicBaseURL = ""
 	}()
 
 	st, err := store.OpenConfigured(store.Config{
@@ -349,15 +376,36 @@ func runServe(args []string) {
 		}()
 	}
 
+	emailClient, err := mailer.Open(mailer.Config{
+		APIKey:  *resendAPIKey,
+		From:    *emailFrom,
+		ReplyTo: *emailReplyTo,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	appMailer = emailClient
+	appPublicBaseURL = strings.TrimRight(strings.TrimSpace(*publicBaseURL), "/")
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
+	mux.HandleFunc("/api/auth/session", handleAuthSession)
+	mux.HandleFunc("/api/auth/signup", handleAuthSignup)
+	mux.HandleFunc("/api/auth/login", handleAuthLogin)
+	mux.HandleFunc("/api/auth/logout", handleAuthLogout)
+	mux.HandleFunc("/api/auth/verify-email", handleAuthVerifyEmail)
+	mux.HandleFunc("/api/auth/resend-verification", handleAuthResendVerification)
+	mux.HandleFunc("/api/auth/forgot-password", handleAuthForgotPassword)
+	mux.HandleFunc("/api/auth/reset-password", handleAuthResetPassword)
 	mux.HandleFunc("/api/ping", handlePing)
 	mux.HandleFunc("/api/tcpping", handleTCPPing)
 	mux.HandleFunc("/api/portscan", handlePortScan)
 	mux.HandleFunc("/api/history", handleHistory)
 	mux.HandleFunc("/api/export/history", handleHistoryExport)
+	mux.HandleFunc("/api/alerts/rules", handleAlertRules)
 	mux.HandleFunc("/ws", handleWS)
-	mux.Handle("/", http.FileServer(http.Dir(*staticDir)))
+	mux.Handle("/", newStaticHandler(*staticDir))
 
 	srv := &http.Server{
 		Addr:              *listen,
@@ -378,6 +426,9 @@ func runServe(args []string) {
 	if objStore != nil {
 		fmt.Printf("Object storage: %s bucket=%s prefix=%s\n", *s3Endpoint, *s3Bucket, *s3Prefix)
 	}
+	if emailClient != nil {
+		fmt.Printf("Email delivery: Resend from=%s\n", *emailFrom)
+	}
 
 	// Handle graceful shutdown on SIGINT/SIGTERM
 	sigChan := make(chan os.Signal, 1)
@@ -397,6 +448,61 @@ func runServe(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func newStaticHandler(staticDir string) http.Handler {
+	fileServer := http.FileServer(http.Dir(staticDir))
+	indexPath := filepath.Join(staticDir, "index.html")
+	indexRoutes := map[string]struct{}{
+		"/":                       {},
+		"/icmp-ping":              {},
+		"/tcp-ping":               {},
+		"/port-scan":              {},
+		"/history":                {},
+		"/alerts":                 {},
+		"/settings":               {},
+		"/profile":                {},
+		"/dns-lookup":             {},
+		"/whois-query":            {},
+		"/arp-table":              {},
+		"/netstat":                {},
+		"/traceroute":             {},
+		"/ping-sweep":             {},
+		"/ssl-tls-check":          {},
+		"/http-header-analyzer":   {},
+		"/service-fingerprinting": {},
+		"/firewall-testing":       {},
+		"/nat-proxy-detection":    {},
+		"/packet-capture":         {},
+		"/bandwidth-test":         {},
+		"/snmp-queries":           {},
+		"/multi-host-monitoring":  {},
+		"/ip-geolocation":         {},
+		"/mac-vendor-lookup":      {},
+		"/ipv6-support":           {},
+		"/logging-system":         {},
+		"/export-results":         {},
+		"/visualization":          {},
+		"/scheduler":              {},
+		"/dashboard-view":         {},
+		"/api-mode":               {},
+		"/plugin-system":          {},
+		"/gui-cli-hybrid":         {},
+		"/mobile-output":          {},
+		"/login":                  {},
+		"/signup":                 {},
+		"/verify-email":           {},
+		"/forgot-password":        {},
+		"/reset-password":         {},
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := indexRoutes[r.URL.Path]; ok {
+			http.ServeFile(w, r, indexPath)
+			return
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 }
 
 func splitHostPort(target string) (string, int, bool) {
@@ -665,8 +771,42 @@ func parseHistoryQuery(values url.Values) (string, string, int, int, error) {
 	return reqType, host, port, limit, nil
 }
 
-func historyCacheKey(reqType, host string, port, limit int) string {
-	return fmt.Sprintf("history:%s:%s:%d:%d", reqType, host, port, limit)
+func parseHistoryExportRequest(req historyExportRequest) (string, string, int, int, string, string, error) {
+	values := url.Values{}
+	values.Set("type", req.Type)
+	values.Set("host", req.Host)
+	if req.Port > 0 {
+		values.Set("port", strconv.Itoa(req.Port))
+	}
+	if req.Limit > 0 {
+		values.Set("limit", strconv.Itoa(req.Limit))
+	}
+	reqType, host, port, limit, err := parseHistoryQuery(values)
+	if err != nil {
+		return "", "", 0, 0, "", "", err
+	}
+
+	format := strings.ToLower(strings.TrimSpace(req.Format))
+	if format == "" {
+		format = "json"
+	}
+	if format != "json" && format != "csv" {
+		return "", "", 0, 0, "", "", fmt.Errorf("format must be json or csv")
+	}
+
+	destination := strings.ToLower(strings.TrimSpace(req.Destination))
+	if destination == "" {
+		destination = "download"
+	}
+	if destination != "download" && destination != "s3" {
+		return "", "", 0, 0, "", "", fmt.Errorf("destination must be download or s3")
+	}
+
+	return reqType, host, port, limit, format, destination, nil
+}
+
+func historyCacheKey(userID int64, reqType, host string, port, limit int) string {
+	return fmt.Sprintf("history:%d:%s:%s:%d:%d", userID, reqType, host, port, limit)
 }
 
 func exportFileName(reqType, host string, port int, format string) string {
@@ -677,8 +817,8 @@ func exportFileName(reqType, host string, port int, format string) string {
 	return fmt.Sprintf("%s_%s.%s", reqType, baseHost, format)
 }
 
-func buildExportObjectKey(reqType, host string, port int, format string) string {
-	return fmt.Sprintf("exports/%s/%d/%s", reqType, time.Now().UTC().Unix(), exportFileName(reqType, host, port, format))
+func buildExportObjectKey(userID int64, reqType, host string, port int, format string) string {
+	return fmt.Sprintf("exports/%d/%s/%d/%s", userID, reqType, time.Now().UTC().UnixNano(), exportFileName(reqType, host, port, format))
 }
 
 func historyCSVRows(points []store.HistoryPoint) [][]string {
@@ -875,6 +1015,65 @@ type apiError struct {
 	Error string `json:"error"`
 }
 
+type authRequest struct {
+	Name     string `json:"name,omitempty"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+type authForgotPasswordRequest struct {
+	Email string `json:"email"`
+}
+
+type authResetPasswordRequest struct {
+	Token    string `json:"token"`
+	Password string `json:"password"`
+}
+
+type authVerifyEmailRequest struct {
+	Email string `json:"email"`
+	Code  string `json:"code"`
+}
+
+type alertRuleRequest struct {
+	ID                   int64   `json:"id,omitempty"`
+	Name                 string  `json:"name,omitempty"`
+	Protocol             string  `json:"protocol"`
+	Target               string  `json:"target"`
+	Port                 int     `json:"port,omitempty"`
+	RecipientEmail       string  `json:"recipient_email,omitempty"`
+	LatencyThresholdMs   float64 `json:"latency_threshold_ms,omitempty"`
+	LossThresholdPercent float64 `json:"loss_threshold_percent,omitempty"`
+	ConsecutiveBreaches  int     `json:"consecutive_breaches,omitempty"`
+	CooldownMinutes      int     `json:"cooldown_minutes,omitempty"`
+	NotifyOnRecovery     *bool   `json:"notify_on_recovery,omitempty"`
+	Enabled              *bool   `json:"enabled,omitempty"`
+}
+
+type authUser struct {
+	ID              int64      `json:"id"`
+	Name            string     `json:"name"`
+	Email           string     `json:"email"`
+	EmailVerifiedAt *time.Time `json:"email_verified_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+}
+
+type authSessionResponse struct {
+	Authenticated bool      `json:"authenticated"`
+	User          *authUser `json:"user,omitempty"`
+}
+
+type authMessageResponse struct {
+	OK                   bool      `json:"ok"`
+	Message              string    `json:"message"`
+	PreviewURL           string    `json:"preview_url,omitempty"`
+	PreviewCode          string    `json:"preview_code,omitempty"`
+	VerificationRequired bool      `json:"verification_required,omitempty"`
+	Authenticated        bool      `json:"authenticated,omitempty"`
+	User                 *authUser `json:"user,omitempty"`
+	Email                string    `json:"email,omitempty"`
+}
+
 type pingRequest struct {
 	Host       string `json:"host"`
 	Count      int    `json:"count"`
@@ -897,6 +1096,15 @@ type portScanRequest struct {
 	Ports       string `json:"ports"`
 	TimeoutMs   int    `json:"timeout_ms"`
 	Concurrency int    `json:"concurrency"`
+}
+
+type historyExportRequest struct {
+	Type        string `json:"type"`
+	Host        string `json:"host"`
+	Port        int    `json:"port,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
+	Format      string `json:"format,omitempty"`
+	Destination string `json:"destination,omitempty"`
 }
 
 type wsRequest struct {
@@ -947,7 +1155,7 @@ func (w *wsWriter) WriteEvent(evt wsEvent) error {
 	return w.conn.WriteJSON(evt)
 }
 
-func (s *wsSession) start(req wsRequest) bool {
+func (s *wsSession) start(user store.User, req wsRequest) bool {
 	s.mu.Lock()
 	if s.cancel != nil {
 		s.mu.Unlock()
@@ -961,7 +1169,7 @@ func (s *wsSession) start(req wsRequest) bool {
 
 	go func() {
 		defer close(done)
-		err := runWSRequest(ctx, s.writer, req)
+		err := runWSRequest(ctx, s.writer, user, req)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			_ = s.writer.WriteEvent(wsEvent{Type: "error", Error: err.Error()})
 		}
@@ -1007,8 +1215,1016 @@ var wsUpgrader = websocket.Upgrader{
 var appStore *store.Store
 var appCache *cache.Cache
 var appObjectStore *objectstore.Client
+var appMailer *mailer.Client
+var appPublicBaseURL string
 var probeLimiter = make(chan struct{}, maxConcurrentProbes)
 var rejectedProbeRequests atomic.Uint64
+var authRateLimiter = newRateLimiter()
+
+type rateLimitConfig struct {
+	Limit  int
+	Window time.Duration
+}
+
+type rateLimitBucket struct {
+	hits     []time.Time
+	lastSeen time.Time
+}
+
+type rateLimiter struct {
+	mu        sync.Mutex
+	buckets   map[string]*rateLimitBucket
+	lastSweep time.Time
+}
+
+func newRateLimiter() *rateLimiter {
+	return &rateLimiter{
+		buckets:   make(map[string]*rateLimitBucket),
+		lastSweep: time.Now(),
+	}
+}
+
+func handleAuthSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	if appStore == nil {
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "storage not available"})
+		return
+	}
+
+	user, _, err := currentSessionUser(r)
+	if err != nil {
+		if errors.Is(err, store.ErrSessionNotFound) || errors.Is(err, http.ErrNoCookie) {
+			writeJSON(w, http.StatusOK, authSessionResponse{Authenticated: false})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, authSessionResponse{
+		Authenticated: true,
+		User:          toAuthUser(user),
+	})
+}
+
+func handleAuthSignup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	if !isAllowedRequestOrigin(r) {
+		writeJSON(w, http.StatusForbidden, apiError{Error: "forbidden origin"})
+		return
+	}
+	if appStore == nil {
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "storage not available"})
+		return
+	}
+
+	var req authRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+
+	name, err := normalizeDisplayName(req.Name)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	email, err := store.NormalizeEmail(req.Email)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	if !enforceRateLimit(w, r, "auth-signup", email, rateLimitConfig{Limit: 5, Window: 15 * time.Minute}) {
+		return
+	}
+	if err := validatePassword(req.Password); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: "failed to hash password"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	_ = appStore.DeleteExpiredSessions(ctx)
+	_ = appStore.DeleteExpiredEmailVerificationCodes(ctx)
+	user, err := appStore.CreateUser(ctx, name, email, string(passwordHash), true)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrUserExists):
+			writeJSON(w, http.StatusConflict, apiError{Error: "user already exists"})
+		default:
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		}
+		return
+	}
+
+	resp, err := prepareVerificationChallenge(ctx, r, user)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, resp)
+}
+
+func handleAuthLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	if !isAllowedRequestOrigin(r) {
+		writeJSON(w, http.StatusForbidden, apiError{Error: "forbidden origin"})
+		return
+	}
+	if appStore == nil {
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "storage not available"})
+		return
+	}
+
+	var req authRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+
+	email, err := store.NormalizeEmail(req.Email)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	if !enforceRateLimit(w, r, "auth-login", email, rateLimitConfig{Limit: 8, Window: 15 * time.Minute}) {
+		return
+	}
+	if strings.TrimSpace(req.Password) == "" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "password is required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	_ = appStore.DeleteExpiredSessions(ctx)
+	user, passwordHash, err := appStore.AuthenticateUser(ctx, email)
+	if err != nil {
+		if errors.Is(err, store.ErrInvalidCredentials) {
+			writeJSON(w, http.StatusUnauthorized, apiError{Error: "invalid email or password"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+		writeJSON(w, http.StatusUnauthorized, apiError{Error: "invalid email or password"})
+		return
+	}
+	if user.VerificationRequired {
+		writeJSON(w, http.StatusForbidden, authMessageResponse{
+			OK:                   false,
+			Message:              "Email verification required. Enter the OTP sent to your inbox.",
+			VerificationRequired: true,
+			Email:                user.Email,
+		})
+		return
+	}
+
+	if err := issueSession(w, r, ctx, user); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, authSessionResponse{
+		Authenticated: true,
+		User:          toAuthUser(user),
+	})
+}
+
+func handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	if !isAllowedRequestOrigin(r) {
+		writeJSON(w, http.StatusForbidden, apiError{Error: "forbidden origin"})
+		return
+	}
+	if appStore == nil {
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "storage not available"})
+		return
+	}
+
+	if tokenHash, err := sessionTokenHashFromRequest(r); err == nil && tokenHash != "" {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		_ = appStore.DeleteSession(ctx, tokenHash)
+		cancel()
+	}
+	clearSessionCookie(w, r)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func handleAuthVerifyEmail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	if !isAllowedRequestOrigin(r) {
+		writeJSON(w, http.StatusForbidden, apiError{Error: "forbidden origin"})
+		return
+	}
+	if appStore == nil {
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "storage not available"})
+		return
+	}
+
+	var req authVerifyEmailRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+
+	email, err := store.NormalizeEmail(req.Email)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	if !enforceRateLimit(w, r, "auth-verify-email", email, rateLimitConfig{Limit: 6, Window: 10 * time.Minute}) {
+		return
+	}
+	code := normalizeVerificationCode(req.Code)
+	if code == "" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "verification code is required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	_ = appStore.DeleteExpiredEmailVerificationCodes(ctx)
+	user, err := appStore.VerifyUserEmailCode(ctx, email, hashOpaqueToken(code))
+	if err != nil {
+		if errors.Is(err, store.ErrVerificationCode) {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "verification code is invalid or expired"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+
+	if err := issueSession(w, r, ctx, user); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+
+	if appMailer != nil {
+		welcomeCtx, welcomeCancel := context.WithTimeout(context.Background(), 8*time.Second)
+		if err := appMailer.SendWelcome(welcomeCtx, mailer.WelcomeEmailInput{
+			To:           user.Email,
+			Name:         user.Name,
+			DashboardURL: buildDashboardURL(r, "alerts"),
+		}); err != nil {
+			log.Printf("welcome email failed for %s: %v", user.Email, err)
+		}
+		welcomeCancel()
+	}
+
+	writeJSON(w, http.StatusOK, authMessageResponse{
+		OK:            true,
+		Authenticated: true,
+		User:          toAuthUser(user),
+		Message:       "Email verified. Access granted.",
+		Email:         user.Email,
+	})
+}
+
+func handleAuthResendVerification(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	if !isAllowedRequestOrigin(r) {
+		writeJSON(w, http.StatusForbidden, apiError{Error: "forbidden origin"})
+		return
+	}
+	if appStore == nil {
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "storage not available"})
+		return
+	}
+
+	var req authForgotPasswordRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+
+	email, err := store.NormalizeEmail(req.Email)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	if !enforceRateLimit(w, r, "auth-resend-verification", email, rateLimitConfig{Limit: 3, Window: 10 * time.Minute}) {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	user, err := appStore.GetUserByEmail(ctx, email)
+	if err != nil {
+		if errors.Is(err, store.ErrUserNotFound) {
+			writeJSON(w, http.StatusOK, authMessageResponse{
+				OK:      true,
+				Message: "If an account is pending verification, a new OTP has been issued.",
+			})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if !user.VerificationRequired {
+		writeJSON(w, http.StatusOK, authMessageResponse{
+			OK:      true,
+			Message: "This email is already verified. You can sign in now.",
+			Email:   user.Email,
+		})
+		return
+	}
+	recent, err := appStore.HasRecentEmailVerificationCode(ctx, user.ID, time.Now().Add(-verifyResendCooldown))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if recent {
+		writeJSON(w, http.StatusOK, authMessageResponse{
+			OK:      true,
+			Message: "A recent verification code is still active. Check your inbox before requesting another.",
+			Email:   user.Email,
+		})
+		return
+	}
+
+	resp, err := prepareVerificationChallenge(ctx, r, user)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
+		return
+	}
+	resp.Message = "A fresh verification code has been sent."
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func handleAuthForgotPassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	if !isAllowedRequestOrigin(r) {
+		writeJSON(w, http.StatusForbidden, apiError{Error: "forbidden origin"})
+		return
+	}
+	if appStore == nil {
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "storage not available"})
+		return
+	}
+
+	var req authForgotPasswordRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+
+	email, err := store.NormalizeEmail(req.Email)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	if !enforceRateLimit(w, r, "auth-forgot-password", email, rateLimitConfig{Limit: 3, Window: 15 * time.Minute}) {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	_ = appStore.DeleteExpiredPasswordResetTokens(ctx)
+
+	resp := authMessageResponse{
+		OK:      true,
+		Message: "If an account exists, a reset link has been issued.",
+	}
+
+	user, err := appStore.GetUserByEmail(ctx, email)
+	if err != nil {
+		if errors.Is(err, store.ErrUserNotFound) {
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	recent, err := appStore.HasRecentPasswordResetToken(ctx, user.ID, time.Now().Add(-resetIssueCooldown))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if recent {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	token, tokenHash, err := generatePasswordResetToken()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: "failed to create reset token"})
+		return
+	}
+	expiresAt := time.Now().Add(defaultResetTTL)
+	if err := appStore.CreatePasswordResetToken(ctx, user.ID, tokenHash, expiresAt); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+
+	resetURL := buildPasswordResetURL(r, token)
+	if appMailer != nil {
+		if err := appMailer.SendPasswordReset(ctx, mailer.PasswordResetInput{
+			To:        user.Email,
+			Name:      user.Name,
+			ResetURL:  resetURL,
+			ExpiresIn: defaultResetTTL,
+		}); err != nil {
+			if cleanupErr := appStore.DeletePasswordResetToken(ctx, user.ID); cleanupErr != nil {
+				log.Printf("password reset token cleanup failed for %s: %v", user.Email, cleanupErr)
+			}
+			log.Printf("password reset email failed for %s: %v", user.Email, err)
+			writeJSON(w, http.StatusBadGateway, apiError{Error: "email delivery is temporarily unavailable"})
+			return
+		}
+		resp.Message = "If an account exists, a reset link has been sent to the inbox."
+	} else {
+		log.Printf("password reset requested for %s: %s (expires %s)", user.Email, resetURL, expiresAt.UTC().Format(time.RFC3339))
+		resp.Message = "If an account exists, a reset link has been issued locally."
+	}
+	if appMailer == nil && isLocalRequestHost(r.Host) {
+		resp.PreviewURL = resetURL
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func handleAuthResetPassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	if !isAllowedRequestOrigin(r) {
+		writeJSON(w, http.StatusForbidden, apiError{Error: "forbidden origin"})
+		return
+	}
+	if appStore == nil {
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "storage not available"})
+		return
+	}
+
+	var req authResetPasswordRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+
+	token := strings.TrimSpace(req.Token)
+	if token == "" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "reset token is required"})
+		return
+	}
+	if err := validatePassword(req.Password); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: "failed to hash password"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	if err := appStore.DeleteExpiredPasswordResetTokens(ctx); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if err := appStore.ResetPasswordWithToken(ctx, hashOpaqueToken(token), string(passwordHash)); err != nil {
+		if errors.Is(err, store.ErrResetTokenNotFound) {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "reset link is invalid or expired"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+
+	clearSessionCookie(w, r)
+	writeJSON(w, http.StatusOK, authMessageResponse{
+		OK:      true,
+		Message: "Password updated. Sign in with your new password.",
+	})
+}
+
+func handleAlertRules(w http.ResponseWriter, r *http.Request) {
+	user, ok := requireAuthenticatedUser(w, r)
+	if !ok {
+		return
+	}
+	if appStore == nil {
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "storage not available"})
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		rules, err := appStore.ListAlertRules(ctx, user.ID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rules)
+	case http.MethodPost:
+		if !isAllowedRequestOrigin(r) {
+			writeJSON(w, http.StatusForbidden, apiError{Error: "forbidden origin"})
+			return
+		}
+		var req alertRuleRequest
+		if err := decodeJSON(w, r, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+			return
+		}
+		rule, err := normalizeAlertRuleRequest(user, req)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		saved, err := appStore.SaveAlertRule(ctx, rule)
+		if err != nil {
+			switch {
+			case errors.Is(err, store.ErrAlertRuleNotFound):
+				writeJSON(w, http.StatusNotFound, apiError{Error: "alert rule not found"})
+			default:
+				writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+			}
+			return
+		}
+		status := http.StatusOK
+		if req.ID == 0 {
+			status = http.StatusCreated
+		}
+		writeJSON(w, status, saved)
+	case http.MethodDelete:
+		if !isAllowedRequestOrigin(r) {
+			writeJSON(w, http.StatusForbidden, apiError{Error: "forbidden origin"})
+			return
+		}
+		ruleID, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("id")), 10, 64)
+		if err != nil || ruleID <= 0 {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "valid rule id is required"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if err := appStore.DeleteAlertRule(ctx, user.ID, ruleID); err != nil {
+			switch {
+			case errors.Is(err, store.ErrAlertRuleNotFound):
+				writeJSON(w, http.StatusNotFound, apiError{Error: "alert rule not found"})
+			default:
+				writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": ruleID})
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+	}
+}
+
+func normalizeAlertRuleRequest(user store.User, req alertRuleRequest) (store.AlertRule, error) {
+	protocol := strings.ToLower(strings.TrimSpace(req.Protocol))
+	target := strings.TrimSpace(req.Target)
+	port := req.Port
+
+	switch protocol {
+	case "ping":
+		normalizedTarget, err := normalizeHost(target)
+		if err != nil {
+			return store.AlertRule{}, err
+		}
+		target = normalizedTarget
+		port = 0
+	case "tcpping":
+		if parsedHost, parsedPort, ok := splitHostPort(target); ok {
+			target = parsedHost
+			if port == 0 {
+				port = parsedPort
+			}
+		}
+		normalizedTarget, normalizedPort, _, err := normalizeTCPPingRequest(target, port, 1, defaultProbeInterval, defaultProbeTimeout)
+		if err != nil {
+			return store.AlertRule{}, err
+		}
+		target = normalizedTarget
+		port = normalizedPort
+	default:
+		return store.AlertRule{}, fmt.Errorf("protocol must be ping or tcpping")
+	}
+
+	var latencyThreshold *float64
+	if req.LatencyThresholdMs > 0 {
+		v := req.LatencyThresholdMs
+		latencyThreshold = &v
+	}
+	var lossThreshold *float64
+	if req.LossThresholdPercent > 0 {
+		v := req.LossThresholdPercent
+		lossThreshold = &v
+	}
+
+	recipientEmail := strings.TrimSpace(req.RecipientEmail)
+	if recipientEmail == "" {
+		recipientEmail = user.Email
+	}
+
+	notifyOnRecovery := true
+	if req.NotifyOnRecovery != nil {
+		notifyOnRecovery = *req.NotifyOnRecovery
+	}
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+
+	rule := store.AlertRule{
+		ID:                   req.ID,
+		UserID:               user.ID,
+		Name:                 strings.TrimSpace(req.Name),
+		Protocol:             protocol,
+		Target:               target,
+		RecipientEmail:       recipientEmail,
+		LatencyThresholdMs:   latencyThreshold,
+		LossThresholdPercent: lossThreshold,
+		ConsecutiveBreaches:  req.ConsecutiveBreaches,
+		CooldownMinutes:      req.CooldownMinutes,
+		NotifyOnRecovery:     notifyOnRecovery,
+		Enabled:              enabled,
+	}
+	if protocol == "tcpping" {
+		rule.Port = &port
+	}
+	return rule, nil
+}
+
+func requireAuthenticatedUser(w http.ResponseWriter, r *http.Request) (store.User, bool) {
+	if appStore == nil {
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "storage not available"})
+		return store.User{}, false
+	}
+	user, _, err := currentSessionUser(r)
+	if err != nil {
+		if errors.Is(err, store.ErrSessionNotFound) || errors.Is(err, http.ErrNoCookie) {
+			writeJSON(w, http.StatusUnauthorized, apiError{Error: "authentication required"})
+			return store.User{}, false
+		}
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return store.User{}, false
+	}
+	return user, true
+}
+
+func currentSessionUser(r *http.Request) (store.User, string, error) {
+	tokenHash, err := sessionTokenHashFromRequest(r)
+	if err != nil {
+		return store.User{}, "", err
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	user, err := appStore.GetUserBySessionToken(ctx, tokenHash)
+	if err != nil {
+		return store.User{}, "", err
+	}
+	return user, tokenHash, nil
+}
+
+func sessionTokenHashFromRequest(r *http.Request) (string, error) {
+	cookie, err := r.Cookie(authCookieName)
+	if err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(cookie.Value)
+	if token == "" {
+		return "", http.ErrNoCookie
+	}
+	return hashSessionToken(token), nil
+}
+
+func issueSession(w http.ResponseWriter, r *http.Request, ctx context.Context, user store.User) error {
+	token, tokenHash, err := generateSessionToken()
+	if err != nil {
+		return fmt.Errorf("failed to create session token")
+	}
+	expiresAt := time.Now().Add(defaultSessionTTL)
+	if err := appStore.CreateSession(ctx, user.ID, tokenHash, expiresAt); err != nil {
+		return err
+	}
+	setSessionCookie(w, r, token, expiresAt)
+	return nil
+}
+
+func generateSessionToken() (string, string, error) {
+	return generateOpaqueToken()
+}
+
+func generatePasswordResetToken() (string, string, error) {
+	return generateOpaqueToken()
+}
+
+func generateVerificationCode() (string, string, error) {
+	const digits = "0123456789"
+	buf := make([]byte, 6)
+	for i := range buf {
+		n, err := rand.Int(rand.Reader, bigTen)
+		if err != nil {
+			return "", "", err
+		}
+		buf[i] = digits[n.Int64()]
+	}
+	code := string(buf)
+	return code, hashOpaqueToken(code), nil
+}
+
+func generateOpaqueToken() (string, string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", "", err
+	}
+	token := base64.RawURLEncoding.EncodeToString(buf)
+	return token, hashOpaqueToken(token), nil
+}
+
+func hashSessionToken(token string) string {
+	return hashOpaqueToken(token)
+}
+
+func hashOpaqueToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+var bigTen = func() *big.Int {
+	return big.NewInt(10)
+}()
+
+func setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expiresAt time.Time) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     authCookieName,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsSecure(r),
+		Expires:  expiresAt,
+		MaxAge:   int(time.Until(expiresAt).Seconds()),
+	})
+}
+
+func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     authCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsSecure(r),
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+	})
+}
+
+func requestIsSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
+		return true
+	}
+	if strings.Contains(strings.ToLower(r.Header.Get("Cf-Visitor")), "\"https\"") {
+		return true
+	}
+	return false
+}
+
+func requestHost(r *http.Request) string {
+	if forwardedHost := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); forwardedHost != "" {
+		return forwardedHost
+	}
+	return r.Host
+}
+
+func requestScheme(r *http.Request) string {
+	if requestIsSecure(r) {
+		return "https"
+	}
+	return "http"
+}
+
+func buildPasswordResetURL(r *http.Request, token string) string {
+	if appPublicBaseURL != "" {
+		return fmt.Sprintf("%s/reset-password?token=%s", appPublicBaseURL, url.QueryEscape(token))
+	}
+	return fmt.Sprintf("%s://%s/reset-password?token=%s", requestScheme(r), requestHost(r), url.QueryEscape(token))
+}
+
+func buildDashboardURL(r *http.Request, panel string) string {
+	base := buildConfiguredDashboardURL(panel)
+	if base != "" {
+		return base
+	}
+	root := fmt.Sprintf("%s://%s/", requestScheme(r), requestHost(r))
+	if panel == "" {
+		return root
+	}
+	return root + "?panel=" + url.QueryEscape(panel)
+}
+
+func buildConfiguredDashboardURL(panel string) string {
+	base := strings.TrimRight(strings.TrimSpace(appPublicBaseURL), "/")
+	if base == "" {
+		return ""
+	}
+	if panel == "" {
+		return base + "/"
+	}
+	return base + "/?panel=" + url.QueryEscape(panel)
+}
+
+func enqueueAlertEvaluation(user store.User, protocol, target string, port int, summary report.Summary, dashboardURL string) {
+	if appStore == nil {
+		return
+	}
+
+	sample := store.AlertSample{
+		LossPercent: summary.Loss,
+		Sent:        summary.Sent,
+		Recv:        summary.Recv,
+	}
+	if summary.Recv > 0 {
+		avgMs := float64(summary.Avg) / float64(time.Millisecond)
+		sample.LatencyAvgMs = &avgMs
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		decisions, err := appStore.EvaluateAlertRules(ctx, user.ID, protocol, target, port, sample)
+		if err != nil {
+			log.Printf("alert evaluation failed for %s/%s: %v", protocol, target, err)
+			return
+		}
+		if appMailer == nil {
+			return
+		}
+		for _, decision := range decisions {
+			alertTitle := decision.Rule.Name
+			if strings.TrimSpace(alertTitle) == "" {
+				alertTitle = "Monitoring Alert"
+			}
+			if err := appMailer.SendAlert(ctx, mailer.AlertEmailInput{
+				To:           decision.Rule.RecipientEmail,
+				Name:         user.Name,
+				Severity:     decision.Severity,
+				Title:        alertTitle,
+				Summary:      decision.Summary,
+				Target:       alertTargetLabel(decision.Rule),
+				TriggeredAt:  time.Now().UTC(),
+				DashboardURL: dashboardURL,
+			}); err != nil {
+				log.Printf("alert email failed for rule %d: %v", decision.Rule.ID, err)
+			}
+		}
+	}()
+}
+
+func alertTargetLabel(rule store.AlertRule) string {
+	if rule.Protocol == "tcpping" && rule.Port != nil {
+		return fmt.Sprintf("%s:%d", rule.Target, *rule.Port)
+	}
+	return rule.Target
+}
+
+func isLocalRequestHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if strings.Contains(host, ":") {
+		if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+			host = parsedHost
+		}
+	}
+	host = strings.Trim(host, "[]")
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeVerificationCode(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, " ", "")
+	return value
+}
+
+func prepareVerificationChallenge(ctx context.Context, r *http.Request, user store.User) (authMessageResponse, error) {
+	code, codeHash, err := generateVerificationCode()
+	if err != nil {
+		return authMessageResponse{}, fmt.Errorf("failed to generate verification code")
+	}
+	expiresAt := time.Now().Add(defaultVerifyCodeTTL)
+	if err := appStore.CreateEmailVerificationCode(ctx, user.ID, codeHash, expiresAt); err != nil {
+		return authMessageResponse{}, err
+	}
+
+	resp := authMessageResponse{
+		OK:                   true,
+		Message:              "Account created. Enter the OTP sent to your email to activate access.",
+		VerificationRequired: true,
+		Email:                user.Email,
+	}
+
+	if appMailer != nil {
+		if err := appMailer.SendVerificationOTP(ctx, mailer.VerificationOTPInput{
+			To:        user.Email,
+			Name:      user.Name,
+			Code:      code,
+			ExpiresIn: defaultVerifyCodeTTL,
+		}); err != nil {
+			if cleanupErr := appStore.DeleteEmailVerificationCode(ctx, user.ID); cleanupErr != nil {
+				log.Printf("verification code cleanup failed for %s: %v", user.Email, cleanupErr)
+			}
+			log.Printf("verification email failed for %s: %v", user.Email, err)
+			resp.Message = "Account created, but email delivery failed. Request a new OTP to continue."
+			return resp, nil
+		}
+		return resp, nil
+	}
+
+	log.Printf("email verification requested for %s: otp=%s (expires %s)", user.Email, code, expiresAt.UTC().Format(time.RFC3339))
+	resp.PreviewCode = code
+	resp.Message = "Account created. Enter the OTP below to activate access."
+	return resp, nil
+}
+
+func normalizeDisplayName(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("name is required")
+	}
+	if len(value) > maxNameLength {
+		return "", fmt.Errorf("name must be %d characters or fewer", maxNameLength)
+	}
+	return value, nil
+}
+
+func validatePassword(value string) error {
+	if len(value) < minPasswordLength {
+		return fmt.Errorf("password must be at least %d characters", minPasswordLength)
+	}
+	if len(value) > maxPasswordLength {
+		return fmt.Errorf("password must be %d characters or fewer", maxPasswordLength)
+	}
+	return nil
+}
+
+func toAuthUser(user store.User) *authUser {
+	return &authUser{
+		ID:              user.ID,
+		Name:            user.Name,
+		Email:           user.Email,
+		EmailVerifiedAt: user.EmailVerifiedAt,
+		CreatedAt:       user.CreatedAt,
+	}
+}
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -1088,6 +2304,10 @@ func handlePing(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
 		return
 	}
+	user, ok := requireAuthenticatedUser(w, r)
+	if !ok {
+		return
+	}
 	if !isAllowedRequestOrigin(r) {
 		writeJSON(w, http.StatusForbidden, apiError{Error: "forbidden origin"})
 		return
@@ -1129,7 +2349,7 @@ func handlePing(w http.ResponseWriter, r *http.Request) {
 	defer release()
 
 	rep, err := ping.RunStreamContext(r.Context(), req.Host, cfg, func(res report.Result) error {
-		storeResult("ping", req.Host, res.Addr, 0, res, time.Now())
+		storeResult(user.ID, "ping", req.Host, res.Addr, 0, res, time.Now())
 		return nil
 	})
 	if err != nil {
@@ -1137,12 +2357,18 @@ func handlePing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	enqueueAlertEvaluation(user, "ping", req.Host, 0, rep.Summary, buildDashboardURL(r, "alerts"))
+
 	writeJSON(w, http.StatusOK, toJSONReport(rep))
 }
 
 func handleTCPPing(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	user, ok := requireAuthenticatedUser(w, r)
+	if !ok {
 		return
 	}
 	if !isAllowedRequestOrigin(r) {
@@ -1191,7 +2417,7 @@ func handleTCPPing(w http.ResponseWriter, r *http.Request) {
 	defer release()
 
 	rep, err := tcpping.RunStreamContext(r.Context(), host, port, cfg, func(res report.Result) error {
-		storeResult("tcpping", host, res.Addr, port, res, time.Now())
+		storeResult(user.ID, "tcpping", host, res.Addr, port, res, time.Now())
 		return nil
 	})
 	if err != nil {
@@ -1199,12 +2425,17 @@ func handleTCPPing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	enqueueAlertEvaluation(user, "tcpping", host, port, rep.Summary, buildDashboardURL(r, "alerts"))
+
 	writeJSON(w, http.StatusOK, toJSONReport(rep))
 }
 
 func handlePortScan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	if _, ok := requireAuthenticatedUser(w, r); !ok {
 		return
 	}
 	if !isAllowedRequestOrigin(r) {
@@ -1249,6 +2480,10 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
 		return
 	}
+	user, ok := requireAuthenticatedUser(w, r)
+	if !ok {
+		return
+	}
 	if appStore == nil {
 		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "storage not available"})
 		return
@@ -1260,7 +2495,7 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cacheKey := historyCacheKey(reqType, host, port, limit)
+	cacheKey := historyCacheKey(user.ID, reqType, host, port, limit)
 	if appCache != nil {
 		var cached []store.HistoryPoint
 		ctx, cancel := context.WithTimeout(r.Context(), 250*time.Millisecond)
@@ -1272,7 +2507,7 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	points, err := appStore.QueryHistory(reqType, host, port, limit)
+	points, err := appStore.QueryHistory(user.ID, reqType, host, port, limit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
@@ -1286,8 +2521,16 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleHistoryExport(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	user, ok := requireAuthenticatedUser(w, r)
+	if !ok {
+		return
+	}
+	if !isAllowedRequestOrigin(r) {
+		writeJSON(w, http.StatusForbidden, apiError{Error: "forbidden origin"})
 		return
 	}
 	if appStore == nil {
@@ -1295,29 +2538,19 @@ func handleHistoryExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reqType, host, port, limit, err := parseHistoryQuery(r.URL.Query())
+	var req historyExportRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+
+	reqType, host, port, limit, format, destination, err := parseHistoryExportRequest(req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
-	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
-	if format == "" {
-		format = "json"
-	}
-	if format != "json" && format != "csv" {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: "format must be json or csv"})
-		return
-	}
-	destination := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("destination")))
-	if destination == "" {
-		destination = "download"
-	}
-	if destination != "download" && destination != "s3" {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: "destination must be download or s3"})
-		return
-	}
 
-	points, err := appStore.QueryHistory(reqType, host, port, limit)
+	points, err := appStore.QueryHistory(user.ID, reqType, host, port, limit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
@@ -1328,7 +2561,7 @@ func handleHistoryExport(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "object storage not configured"})
 			return
 		}
-		key := buildExportObjectKey(reqType, host, port, format)
+		key := buildExportObjectKey(user.ID, reqType, host, port, format)
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		defer cancel()
 
@@ -1377,6 +2610,10 @@ func handleHistoryExport(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleWS(w http.ResponseWriter, r *http.Request) {
+	user, ok := requireAuthenticatedUser(w, r)
+	if !ok {
+		return
+	}
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "WebSocket upgrade error: %v\n", err)
@@ -1417,15 +2654,15 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 				_ = session.writer.WriteEvent(wsEvent{Type: "error", Error: "no active run"})
 			}
 		case "ping":
-			if !session.start(req) {
+			if !session.start(user, req) {
 				_ = session.writer.WriteEvent(wsEvent{Type: "error", Error: "a run is already in progress"})
 			}
 		case "tcpping":
-			if !session.start(req) {
+			if !session.start(user, req) {
 				_ = session.writer.WriteEvent(wsEvent{Type: "error", Error: "a run is already in progress"})
 			}
 		case "portscan":
-			if !session.start(req) {
+			if !session.start(user, req) {
 				_ = session.writer.WriteEvent(wsEvent{Type: "error", Error: "a run is already in progress"})
 			}
 		default:
@@ -1434,12 +2671,12 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func runWSRequest(ctx context.Context, writer *wsWriter, req wsRequest) error {
+func runWSRequest(ctx context.Context, writer *wsWriter, user store.User, req wsRequest) error {
 	switch req.Type {
 	case "ping":
-		return streamPingWS(ctx, writer, req)
+		return streamPingWS(ctx, writer, user, req)
 	case "tcpping":
-		return streamTCPPingWS(ctx, writer, req)
+		return streamTCPPingWS(ctx, writer, user, req)
 	case "portscan":
 		return streamPortScanWS(ctx, writer, req)
 	default:
@@ -1447,7 +2684,7 @@ func runWSRequest(ctx context.Context, writer *wsWriter, req wsRequest) error {
 	}
 }
 
-func streamPingWS(ctx context.Context, writer *wsWriter, req wsRequest) error {
+func streamPingWS(ctx context.Context, writer *wsWriter, user store.User, req wsRequest) error {
 	release, ok := tryAcquireProbeSlot()
 	if !ok {
 		return writer.WriteEvent(wsEvent{Type: "error", Error: "server busy, try again"})
@@ -1475,7 +2712,7 @@ func streamPingWS(ctx context.Context, writer *wsWriter, req wsRequest) error {
 
 	rep, err := ping.RunStreamContext(ctx, req.Host, cfg, func(res report.Result) error {
 		ts := time.Now()
-		storeResult("ping", req.Host, res.Addr, 0, res, ts)
+		storeResult(user.ID, "ping", req.Host, res.Addr, 0, res, ts)
 		jr := toJSONResult(res)
 		return writer.WriteEvent(wsEvent{
 			Type:     "result",
@@ -1500,6 +2737,7 @@ func streamPingWS(ctx context.Context, writer *wsWriter, req wsRequest) error {
 	}
 
 	summary := toJSONSummary(rep.Summary)
+	enqueueAlertEvaluation(user, "ping", req.Host, 0, rep.Summary, buildConfiguredDashboardURL("alerts"))
 	return writer.WriteEvent(wsEvent{
 		Type:     "summary",
 		Protocol: rep.Protocol,
@@ -1509,7 +2747,7 @@ func streamPingWS(ctx context.Context, writer *wsWriter, req wsRequest) error {
 	})
 }
 
-func streamTCPPingWS(ctx context.Context, writer *wsWriter, req wsRequest) error {
+func streamTCPPingWS(ctx context.Context, writer *wsWriter, user store.User, req wsRequest) error {
 	release, ok := tryAcquireProbeSlot()
 	if !ok {
 		return writer.WriteEvent(wsEvent{Type: "error", Error: "server busy, try again"})
@@ -1544,7 +2782,7 @@ func streamTCPPingWS(ctx context.Context, writer *wsWriter, req wsRequest) error
 
 	rep, err := tcpping.RunStreamContext(ctx, host, port, cfg, func(res report.Result) error {
 		ts := time.Now()
-		storeResult("tcpping", host, res.Addr, port, res, ts)
+		storeResult(user.ID, "tcpping", host, res.Addr, port, res, ts)
 		jr := toJSONResult(res)
 		return writer.WriteEvent(wsEvent{
 			Type:     "result",
@@ -1571,6 +2809,7 @@ func streamTCPPingWS(ctx context.Context, writer *wsWriter, req wsRequest) error
 	}
 
 	summary := toJSONSummary(rep.Summary)
+	enqueueAlertEvaluation(user, "tcpping", host, port, rep.Summary, buildConfiguredDashboardURL("alerts"))
 	return writer.WriteEvent(wsEvent{
 		Type:     "summary",
 		Protocol: rep.Protocol,
@@ -1710,6 +2949,101 @@ func defaultPortForRequest(r *http.Request) string {
 	return "80"
 }
 
+func (rl *rateLimiter) Allow(key string, cfg rateLimitConfig) (bool, time.Duration) {
+	if rl == nil {
+		return true, 0
+	}
+	now := time.Now()
+	cutoff := now.Add(-cfg.Window)
+
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	if len(rl.buckets) > maxRateLimitBuckets || now.Sub(rl.lastSweep) >= rateLimitSweepEvery {
+		rl.sweep(now)
+	}
+
+	bucket := rl.buckets[key]
+	if bucket == nil {
+		bucket = &rateLimitBucket{}
+		rl.buckets[key] = bucket
+	}
+
+	filtered := bucket.hits[:0]
+	for _, hit := range bucket.hits {
+		if hit.After(cutoff) {
+			filtered = append(filtered, hit)
+		}
+	}
+	bucket.hits = filtered
+	bucket.lastSeen = now
+
+	if len(bucket.hits) >= cfg.Limit {
+		retryAfter := bucket.hits[0].Add(cfg.Window).Sub(now)
+		if retryAfter < time.Second {
+			retryAfter = time.Second
+		}
+		return false, retryAfter
+	}
+
+	bucket.hits = append(bucket.hits, now)
+	return true, 0
+}
+
+func (rl *rateLimiter) sweep(now time.Time) {
+	cutoff := now.Add(-rateLimitBucketTTL)
+	for key, bucket := range rl.buckets {
+		filtered := bucket.hits[:0]
+		for _, hit := range bucket.hits {
+			if hit.After(cutoff) {
+				filtered = append(filtered, hit)
+			}
+		}
+		bucket.hits = filtered
+		if len(bucket.hits) == 0 && bucket.lastSeen.Before(cutoff) {
+			delete(rl.buckets, key)
+		}
+	}
+	rl.lastSweep = now
+}
+
+func enforceRateLimit(w http.ResponseWriter, r *http.Request, action, subject string, cfg rateLimitConfig) bool {
+	key := buildRateLimitKey(r, action, subject)
+	allowed, retryAfter := authRateLimiter.Allow(key, cfg)
+	if allowed {
+		return true
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+	writeJSON(w, http.StatusTooManyRequests, apiError{Error: "too many requests, try again later"})
+	return false
+}
+
+func buildRateLimitKey(r *http.Request, action, subject string) string {
+	ip := clientIPFromRequest(r)
+	subject = strings.ToLower(strings.TrimSpace(subject))
+	if subject == "" {
+		return action + "|" + ip
+	}
+	return action + "|" + ip + "|" + subject
+}
+
+func clientIPFromRequest(r *http.Request) string {
+	if cfIP := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); cfIP != "" {
+		return cfIP
+	}
+	if forwardedFor := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwardedFor != "" {
+		parts := strings.Split(forwardedFor, ",")
+		if len(parts) > 0 {
+			return strings.TrimSpace(parts[0])
+		}
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil && host != "" {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
+}
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
 	if r.Body == nil {
 		return fmt.Errorf("empty body")
@@ -1839,11 +3173,12 @@ func toJSONPortScanResult(r portscan.Result) jsonResult {
 	return jr
 }
 
-func storeResult(protocol, target, addr string, port int, res report.Result, ts time.Time) {
+func storeResult(userID int64, protocol, target, addr string, port int, res report.Result, ts time.Time) {
 	if appStore == nil {
 		return
 	}
 	rec := store.ResultRecord{
+		UserID:   userID,
 		Ts:       ts,
 		Protocol: protocol,
 		Target:   target,

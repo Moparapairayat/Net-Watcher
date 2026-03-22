@@ -48,6 +48,8 @@ type Report struct {
 	Summary  Summary  `json:"summary"`
 }
 
+var lookupIPAddrs = net.DefaultResolver.LookupIPAddr
+
 func ParsePorts(spec string) ([]int, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
@@ -116,6 +118,8 @@ func RunStreamContext(ctx context.Context, host string, cfg Config, onResult fun
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	if strings.TrimSpace(host) == "" {
 		return Report{}, errors.New("host is required")
 	}
@@ -136,7 +140,7 @@ func RunStreamContext(ctx context.Context, host string, cfg Config, onResult fun
 	}
 
 	started := time.Now()
-	dialHost, resolvedAddr, err := resolveTarget(ctx, host)
+	dialHosts, resolvedAddr, err := resolveTargets(runCtx, host)
 	if err != nil {
 		return Report{}, err
 	}
@@ -153,15 +157,15 @@ func RunStreamContext(ctx context.Context, host string, cfg Config, onResult fun
 			dialer := &net.Dialer{Timeout: cfg.Timeout}
 			for port := range jobs {
 				select {
-				case <-ctx.Done():
+				case <-runCtx.Done():
 					return
 				default:
 				}
 
-				result := scanOne(ctx, dialer, dialHost, port)
+				result := scanAcrossTargets(runCtx, dialer, dialHosts, port)
 				select {
 				case resultsCh <- result:
-				case <-ctx.Done():
+				case <-runCtx.Done():
 					return
 				}
 			}
@@ -173,7 +177,7 @@ func RunStreamContext(ctx context.Context, host string, cfg Config, onResult fun
 		for _, port := range cfg.Ports {
 			select {
 			case jobs <- port:
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			}
 		}
@@ -185,15 +189,17 @@ func RunStreamContext(ctx context.Context, host string, cfg Config, onResult fun
 	}()
 
 	results := make([]Result, 0, len(cfg.Ports))
+	var callbackErr error
 	for result := range resultsCh {
+		if callbackErr != nil {
+			continue
+		}
 		results = append(results, result)
 		if onResult != nil {
 			if err := onResult(result); err != nil {
-				select {
-				case errCh <- err:
-				default:
-				}
-				break
+				callbackErr = err
+				cancel()
+				continue
 			}
 		}
 		select {
@@ -203,7 +209,10 @@ func RunStreamContext(ctx context.Context, host string, cfg Config, onResult fun
 		}
 	}
 
-	if err := ctx.Err(); err != nil {
+	if callbackErr != nil {
+		return buildReport(host, resolvedAddr, results, time.Since(started)), callbackErr
+	}
+	if err := runCtx.Err(); err != nil {
 		return buildReport(host, resolvedAddr, results, time.Since(started)), err
 	}
 	select {
@@ -244,19 +253,62 @@ func buildReport(host, addr string, results []Result, duration time.Duration) Re
 	}
 }
 
-func resolveTarget(ctx context.Context, host string) (string, string, error) {
+func resolveTargets(ctx context.Context, host string) ([]string, string, error) {
 	if ip := net.ParseIP(host); ip != nil {
-		return host, ip.String(), nil
+		return []string{ip.String()}, ip.String(), nil
 	}
 
-	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	addrs, err := lookupIPAddrs(ctx, host)
 	if err != nil {
-		return "", "", err
+		return nil, "", err
 	}
 	if len(addrs) == 0 {
-		return "", "", fmt.Errorf("no address found for %s", host)
+		return nil, "", fmt.Errorf("no address found for %s", host)
 	}
-	return addrs[0].IP.String(), addrs[0].IP.String(), nil
+	dialHosts := make([]string, 0, len(addrs))
+	seen := make(map[string]struct{}, len(addrs))
+	for _, addr := range addrs {
+		ip := addr.IP.String()
+		if ip == "" {
+			continue
+		}
+		if _, ok := seen[ip]; ok {
+			continue
+		}
+		seen[ip] = struct{}{}
+		dialHosts = append(dialHosts, ip)
+	}
+	if len(dialHosts) == 0 {
+		return nil, "", fmt.Errorf("no address found for %s", host)
+	}
+	return dialHosts, dialHosts[0], nil
+}
+
+func scanAcrossTargets(ctx context.Context, dialer *net.Dialer, hosts []string, port int) Result {
+	var firstTimeout *Result
+	var firstClosed *Result
+	for _, host := range hosts {
+		result := scanOne(ctx, dialer, host, port)
+		if result.State == "open" {
+			return result
+		}
+		if result.State == "timeout" && firstTimeout == nil {
+			candidate := result
+			firstTimeout = &candidate
+			continue
+		}
+		if firstClosed == nil {
+			candidate := result
+			firstClosed = &candidate
+		}
+	}
+	if firstTimeout != nil {
+		return *firstTimeout
+	}
+	if firstClosed != nil {
+		return *firstClosed
+	}
+	return Result{Port: port, State: "closed", Error: "connection refused"}
 }
 
 func scanOne(ctx context.Context, dialer *net.Dialer, host string, port int) Result {
@@ -287,6 +339,9 @@ func scanOne(ctx context.Context, dialer *net.Dialer, host string, port int) Res
 }
 
 func classifyError(err error) (string, string) {
+	if errors.Is(err, context.Canceled) {
+		return "closed", "canceled"
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "timeout", "connection timed out"
 	}
@@ -295,6 +350,10 @@ func classifyError(err error) (string, string) {
 		return "timeout", "connection timed out"
 	}
 	if errors.Is(err, syscall.ECONNREFUSED) {
+		return "closed", "connection refused"
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "connection refused") || strings.Contains(message, "actively refused") {
 		return "closed", "connection refused"
 	}
 	return "closed", err.Error()

@@ -1,0 +1,72 @@
+<svg width="760" height="760" viewBox="0 0 760 760" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="planetGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(304 218) rotate(74.862) scale(290.566)">
+      <stop stop-color="#D5F8FF"/>
+      <stop offset="0.24" stop-color="#76D9FF"/>
+      <stop offset="0.58" stop-color="#4E8BFF"/>
+      <stop offset="1" stop-color="#4A39D4"/>
+    </radialGradient>
+    <radialGradient id="satelliteGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(590 406) rotate(113.962) scale(120.438)">
+      <stop stop-color="#FFF7FF"/>
+      <stop offset="0.3" stop-color="#D6A4FF"/>
+      <stop offset="1" stop-color="#7A3BC4"/>
+    </radialGradient>
+    <linearGradient id="lineGlow" x1="134" y1="472" x2="598" y2="258" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#69E1FF" stop-opacity="0"/>
+      <stop offset="0.52" stop-color="#C58BFF"/>
+      <stop offset="1" stop-color="#69E1FF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="badgeGlow" x1="284" y1="310" x2="466" y2="310" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="0.5" stop-color="#8EE0FF"/>
+      <stop offset="1" stop-color="#9B7BFF"/>
+    </linearGradient>
+  </defs>
+
+  <circle cx="304" cy="218" r="220" fill="url(#planetGlow)" fill-opacity="0.92"/>
+  <circle cx="590" cy="406" r="84" fill="url(#satelliteGlow)" fill-opacity="0.94"/>
+  <circle cx="220" cy="620" r="52" fill="#9E4CFF" fill-opacity="0.24"/>
+  <circle cx="182" cy="556" r="7" fill="#F9FDFF"/>
+  <circle cx="516" cy="592" r="9" fill="#F9FDFF"/>
+  <circle cx="636" cy="214" r="8" fill="#E6F7FF"/>
+  <circle cx="90" cy="184" r="9" fill="#E6F7FF"/>
+  <circle cx="118" cy="318" r="5" fill="#D7F0FF"/>
+  <circle cx="556" cy="142" r="5" fill="#D7F0FF"/>
+  <circle cx="648" cy="536" r="5" fill="#D7F0FF"/>
+
+  <path d="M104 480C182 420 292 380 432 398C520 410 586 448 636 500" stroke="#F5F5FF" stroke-opacity="0.30" stroke-width="2"/>
+  <path d="M162 502C254 424 364 390 488 418" stroke="#F5F5FF" stroke-opacity="0.20" stroke-width="2"/>
+
+  <path d="M190 502L320 414L420 456L534 366L618 392" stroke="url(#lineGlow)" stroke-width="3"/>
+  <circle cx="190" cy="502" r="10" fill="#0E0722" stroke="#79DBFF" stroke-width="4"/>
+  <circle cx="320" cy="414" r="10" fill="#0E0722" stroke="#A48DFF" stroke-width="4"/>
+  <circle cx="420" cy="456" r="10" fill="#0E0722" stroke="#79DBFF" stroke-width="4"/>
+  <circle cx="534" cy="366" r="10" fill="#0E0722" stroke="#A48DFF" stroke-width="4"/>
+  <circle cx="618" cy="392" r="10" fill="#0E0722" stroke="#79DBFF" stroke-width="4"/>
+
+  <g filter="url(#badgeShadow)">
+    <rect x="262" y="280" width="220" height="84" rx="24" fill="#140727" fill-opacity="0.82"/>
+    <rect x="262.75" y="280.75" width="218.5" height="82.5" rx="23.25" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="1.5"/>
+  </g>
+  <path d="M306 338L332 304H350L330 330H354L324 370H306L326 338H306Z" fill="url(#badgeGlow)"/>
+  <text x="372" y="316" fill="#F8FBFF" font-family="Sora, Arial, sans-serif" font-size="28" font-weight="700">NetWatcher</text>
+  <text x="372" y="344" fill="#C8D4FF" font-family="Space Grotesk, Arial, sans-serif" font-size="14" letter-spacing="4">MISSION CONTROL</text>
+
+  <path d="M514 180L620 286" stroke="#EEF8FF" stroke-width="3" stroke-linecap="round"/>
+  <path d="M510 184L618 292" stroke="#EEF8FF" stroke-opacity="0.22" stroke-width="14" stroke-linecap="round"/>
+  <path d="M452 580L562 470" stroke="#EEF8FF" stroke-width="3" stroke-linecap="round"/>
+  <path d="M448 584L560 472" stroke="#EEF8FF" stroke-opacity="0.18" stroke-width="14" stroke-linecap="round"/>
+
+  <defs>
+    <filter id="badgeShadow" x="230" y="248" width="284" height="148" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+      <feOffset/>
+      <feGaussianBlur stdDeviation="16"/>
+      <feComposite in2="hardAlpha" operator="out"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.365431 0 0 0 0 0.304806 0 0 0 0 0.866667 0 0 0 0.28 0"/>
+      <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_0_1"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_0_1" result="shape"/>
+    </filter>
+  </defs>
+</svg>

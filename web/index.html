@@ -8,119 +8,1428 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=20260322-41" />
 </head>
-<body>
+<body class="app-booting">
   <div class="bg-grid"></div>
-  <div class="watermark">MPA</div>
   <div class="container">
     <header class="hero">
       <div class="brand">
         <div class="logo">NW</div>
-        <div>
+        <div class="brand-copy">
           <h1 class="brand-name">
             <span class="brand-net">Net</span>
             <span class="brand-watcher">Watcher</span>
           </h1>
-          <p>Network diagnostics in one clean cockpit.</p>
+          <p class="hero-tagline">Network diagnostics cockpit</p>
         </div>
       </div>
-      <div class="modes">
-        <button class="mode active" data-mode="ping">ICMP Ping</button>
-        <button class="mode" data-mode="tcpping">TCP Ping</button>
-        <button class="mode" data-mode="portscan">Port Scan</button>
+      <div class="hero-actions">
+        <button id="sidebar-toggle" class="ghost sidebar-toggle hidden" type="button" aria-expanded="false" aria-controls="dashboard-sidebar">Menu</button>
+        <div id="user-shell" class="user-shell hidden">
+          <button id="user-menu-toggle" class="user-menu-toggle" type="button" aria-expanded="false" aria-haspopup="menu" aria-controls="user-dropdown">
+            <span id="user-chip-icon" class="user-shell-icon">OP</span>
+            <span class="user-menu-caret">▾</span>
+          </button>
+          <div id="user-dropdown" class="user-dropdown hidden" role="menu">
+            <div class="user-dropdown-meta">
+              <strong id="user-name" class="user-name">Operator</strong>
+              <span id="user-label" class="user-label"></span>
+            </div>
+            <button id="open-settings" class="user-dropdown-action" type="button" role="menuitem">Settings</button>
+            <button id="open-profile" class="user-dropdown-action" type="button" role="menuitem">Profile</button>
+            <button id="logout" class="user-dropdown-action user-dropdown-action-danger" type="button" role="menuitem">Log Out</button>
+          </div>
+        </div>
       </div>
     </header>
 
-    <main class="panel">
-      <section class="form">
-        <div class="field">
-          <label for="host">Target Host</label>
-          <input id="host" type="text" placeholder="example.com or 8.8.8.8" />
+    <section id="boot-shell" class="boot-shell" aria-live="polite">
+      <div class="boot-card">
+        <span class="boot-badge">NetWatcher</span>
+        <h2>Restoring session</h2>
+        <p>Checking operator access and preparing your dashboard.</p>
+        <div class="boot-loader" aria-hidden="true">
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      </div>
+    </section>
+
+    <section id="auth-shell" class="auth-shell hidden">
+      <div id="auth-stage" class="auth-stage">
+        <div class="auth-panel">
+          <div class="auth-mini-header">
+            <div class="auth-mini-brand">
+              <span class="auth-mini-logo">NW</span>
+              <div class="auth-mini-copy">
+                <span class="auth-mini-name">NetWatcher</span>
+                <span class="auth-mini-tag">Secure Ops Portal</span>
+              </div>
+            </div>
+            <span class="auth-mini-badge">Private Access</span>
+          </div>
+
+          <div class="auth-head">
+            <div class="auth-copy">
+              <p id="auth-eyebrow" class="auth-eyebrow">Secure Access</p>
+              <h2 id="auth-title">SIGN IN</h2>
+              <p id="auth-subtitle">Sign in with your email address to enter the dashboard.</p>
+            </div>
+            <div class="auth-tabs">
+              <button id="login-tab" class="auth-tab active" type="button">Login</button>
+              <button id="signup-tab" class="auth-tab" type="button">Sign Up</button>
+            </div>
+          </div>
+
+          <div id="auth-error" class="error auth-notice hidden"></div>
+
+          <section id="auth-state-card" class="auth-state-card hidden" aria-live="polite">
+            <div class="auth-state-icon" aria-hidden="true">
+              <span class="auth-state-ring"></span>
+              <span class="auth-state-core"></span>
+            </div>
+            <p id="auth-state-eyebrow" class="auth-state-eyebrow">Action Complete</p>
+            <h3 id="auth-state-title" class="auth-state-title">Check your inbox</h3>
+            <p id="auth-state-message" class="auth-state-message"></p>
+            <p id="auth-state-detail" class="auth-state-detail hidden"></p>
+            <div class="auth-state-actions">
+              <button id="auth-state-primary" class="primary auth-submit" type="button">Continue</button>
+              <button id="auth-state-secondary" class="ghost auth-state-secondary hidden" type="button">Back</button>
+            </div>
+          </section>
+
+          <form id="login-form" class="auth-form">
+            <div class="field auth-field">
+              <div class="auth-input-shell">
+                <input id="login-email" type="email" autocomplete="email" placeholder=" " />
+                <label for="login-email">Email</label>
+              </div>
+            </div>
+            <div class="field auth-field">
+              <div class="auth-input-shell has-toggle">
+                <input id="login-password" type="password" autocomplete="current-password" placeholder=" " />
+                <label for="login-password">Password</label>
+                <button class="auth-toggle-password" type="button" data-target="login-password" aria-label="Show password">
+                  <span class="auth-eye" aria-hidden="true">
+                    <span class="auth-eye-pupil"></span>
+                    <span class="auth-eye-slash"></span>
+                  </span>
+                  <span class="visually-hidden">Show password</span>
+                </button>
+              </div>
+            </div>
+            <button id="login-submit" class="primary auth-submit" type="submit">Sign In</button>
+            <div class="auth-inline-row">
+              <button id="forgot-password-link" class="auth-inline-link" type="button">Forgot password?</button>
+            </div>
+          </form>
+
+          <form id="signup-form" class="auth-form hidden">
+            <div class="field auth-field">
+              <div class="auth-input-shell">
+                <input id="signup-name" type="text" autocomplete="name" placeholder=" " />
+                <label for="signup-name">Full Name</label>
+              </div>
+            </div>
+            <div class="field auth-field">
+              <div class="auth-input-shell">
+                <input id="signup-email" type="email" autocomplete="email" placeholder=" " />
+                <label for="signup-email">Email</label>
+              </div>
+            </div>
+            <div class="field auth-field">
+              <div class="auth-input-shell has-toggle">
+                <input id="signup-password" type="password" autocomplete="new-password" placeholder=" " />
+                <label for="signup-password">Password</label>
+                <button class="auth-toggle-password" type="button" data-target="signup-password" aria-label="Show password">
+                  <span class="auth-eye" aria-hidden="true">
+                    <span class="auth-eye-pupil"></span>
+                    <span class="auth-eye-slash"></span>
+                  </span>
+                  <span class="visually-hidden">Show password</span>
+                </button>
+              </div>
+            </div>
+            <button id="signup-submit" class="primary auth-submit" type="submit">Create Account</button>
+          </form>
+
+          <form id="verify-form" class="auth-form hidden">
+            <div class="field auth-field">
+              <div class="auth-input-shell">
+                <input id="verify-email" type="email" autocomplete="email" placeholder=" " />
+                <label for="verify-email">Email</label>
+              </div>
+            </div>
+            <div class="field auth-field">
+              <div class="auth-input-shell">
+                <input id="verify-code" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder=" " maxlength="6" />
+                <label for="verify-code">6-digit OTP</label>
+              </div>
+            </div>
+            <button id="verify-submit" class="primary auth-submit" type="submit">Verify Email</button>
+            <div class="auth-inline-row auth-inline-row-spread">
+              <button id="verify-resend" class="auth-inline-link" type="button">Resend OTP</button>
+              <button id="verify-back" class="auth-inline-link" type="button">Back to sign in</button>
+            </div>
+          </form>
+
+          <form id="forgot-form" class="auth-form hidden">
+            <div class="field auth-field">
+              <div class="auth-input-shell">
+                <input id="forgot-email" type="email" autocomplete="email" placeholder=" " />
+                <label for="forgot-email">Email</label>
+              </div>
+            </div>
+            <button id="forgot-submit" class="primary auth-submit" type="submit">Send Reset Link</button>
+            <div class="auth-inline-row">
+              <button id="forgot-back" class="auth-inline-link" type="button">Back to sign in</button>
+            </div>
+          </form>
+
+          <form id="reset-form" class="auth-form hidden">
+            <div class="field auth-field">
+              <div class="auth-input-shell has-toggle">
+                <input id="reset-password" type="password" autocomplete="new-password" placeholder=" " />
+                <label for="reset-password">New Password</label>
+                <button class="auth-toggle-password" type="button" data-target="reset-password" aria-label="Show password">
+                  <span class="auth-eye" aria-hidden="true">
+                    <span class="auth-eye-pupil"></span>
+                    <span class="auth-eye-slash"></span>
+                  </span>
+                  <span class="visually-hidden">Show password</span>
+                </button>
+              </div>
+            </div>
+            <div class="field auth-field">
+              <div class="auth-input-shell has-toggle">
+                <input id="reset-password-confirm" type="password" autocomplete="new-password" placeholder=" " />
+                <label for="reset-password-confirm">Confirm Password</label>
+                <button class="auth-toggle-password" type="button" data-target="reset-password-confirm" aria-label="Show password">
+                  <span class="auth-eye" aria-hidden="true">
+                    <span class="auth-eye-pupil"></span>
+                    <span class="auth-eye-slash"></span>
+                  </span>
+                  <span class="visually-hidden">Show password</span>
+                </button>
+              </div>
+            </div>
+            <button id="reset-submit" class="primary auth-submit" type="submit">Update Password</button>
+            <div class="auth-inline-row">
+              <button id="reset-back" class="auth-inline-link" type="button">Back to sign in</button>
+            </div>
+          </form>
+
+          <div class="auth-switch-row">
+            <span class="auth-switch-label">Need another mode?</span>
+            <button id="auth-scene-switch" class="auth-scene-switch" type="button">Need access? Create account</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <main id="app-panel" class="panel hidden">
+      <div id="sidebar-backdrop" class="sidebar-backdrop hidden"></div>
+
+      <aside id="dashboard-sidebar" class="dashboard-sidebar">
+        <div class="sidebar-shell">
+          <div class="sidebar-head">
+            <span class="sidebar-head-label">Main</span>
+          </div>
+
+          <nav class="sidebar-primary-nav">
+            <button class="dashboard-nav-button" data-panel="overview" type="button">
+              <span class="sidebar-nav-icon">OV</span>
+              <span class="sidebar-nav-body">
+                <span class="sidebar-nav-title-row">
+                  <span class="sidebar-nav-title">Overview</span>
+                </span>
+              </span>
+            </button>
+          </nav>
+
+          <section class="sidebar-group is-open">
+            <button class="sidebar-group-toggle" type="button" aria-expanded="true">
+              <span class="sidebar-group-copy">
+                <span class="sidebar-group-icon">DG</span>
+                <span class="sidebar-label">Diagnostics</span>
+              </span>
+            </button>
+            <div class="sidebar-group-body">
+              <nav class="sidebar-nav">
+                <button class="dashboard-nav-button active" data-panel="ping" data-mode="ping" type="button">
+                  <span class="sidebar-nav-icon">IC</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">ICMP Ping</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="tcpping" data-mode="tcpping" type="button">
+                  <span class="sidebar-nav-icon">TC</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">TCP Ping</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="portscan" data-mode="portscan" type="button">
+                  <span class="sidebar-nav-icon">PS</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Port Scan</span>
+                    </span>
+                  </span>
+                </button>
+              </nav>
+            </div>
+          </section>
+
+          <section class="sidebar-group is-open">
+            <button class="sidebar-group-toggle" type="button" aria-expanded="true">
+              <span class="sidebar-group-copy">
+                <span class="sidebar-group-icon">MN</span>
+                <span class="sidebar-label">Monitoring</span>
+              </span>
+            </button>
+            <div class="sidebar-group-body">
+              <nav class="sidebar-nav">
+                <button class="dashboard-nav-button" data-panel="history" type="button">
+                  <span class="sidebar-nav-icon">HI</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">History</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="alerts" type="button">
+                  <span class="sidebar-nav-icon">AL</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Alert Rules</span>
+                    </span>
+                  </span>
+                </button>
+              </nav>
+            </div>
+          </section>
+
+          <section class="sidebar-group">
+            <button class="sidebar-group-toggle" type="button" aria-expanded="false">
+              <span class="sidebar-group-copy">
+                <span class="sidebar-group-icon">DC</span>
+                <span class="sidebar-label">Discovery</span>
+              </span>
+            </button>
+            <div class="sidebar-group-body hidden">
+              <nav class="sidebar-nav">
+                <button class="dashboard-nav-button" data-panel="dns" type="button">
+                  <span class="sidebar-nav-icon">DN</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">DNS Lookup / Reverse DNS</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="whois" type="button">
+                  <span class="sidebar-nav-icon">WA</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">WHOIS Query</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="arp" type="button">
+                  <span class="sidebar-nav-icon">AR</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">ARP Table Viewer</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="netstat" type="button">
+                  <span class="sidebar-nav-icon">NS</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Netstat Integration</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="traceroute" type="button">
+                  <span class="sidebar-nav-icon">TR</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Traceroute</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="pingsweep" type="button">
+                  <span class="sidebar-nav-icon">SW</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Ping Sweep / Subnet Scan</span>
+                    </span>
+                  </span>
+                </button>
+              </nav>
+            </div>
+          </section>
+
+          <section class="sidebar-group">
+            <button class="sidebar-group-toggle" type="button" aria-expanded="false">
+              <span class="sidebar-group-copy">
+                <span class="sidebar-group-icon">SC</span>
+                <span class="sidebar-label">Security</span>
+              </span>
+            </button>
+            <div class="sidebar-group-body hidden">
+              <nav class="sidebar-nav">
+                <button class="dashboard-nav-button" data-panel="sslcheck" type="button">
+                  <span class="sidebar-nav-icon">TL</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">SSL/TLS Certificate Checker</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="httpheaders" type="button">
+                  <span class="sidebar-nav-icon">HT</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">HTTP Header Analyzer</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="fingerprint" type="button">
+                  <span class="sidebar-nav-icon">SF</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Service Fingerprinting</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="firewall" type="button">
+                  <span class="sidebar-nav-icon">FT</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Firewall Testing</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="natproxy" type="button">
+                  <span class="sidebar-nav-icon">NP</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">NAT/Proxy Detection</span>
+                    </span>
+                  </span>
+                </button>
+              </nav>
+            </div>
+          </section>
+
+          <section class="sidebar-group">
+            <button class="sidebar-group-toggle" type="button" aria-expanded="false">
+              <span class="sidebar-group-copy">
+                <span class="sidebar-group-icon">AX</span>
+                <span class="sidebar-label">Advanced Ops</span>
+              </span>
+            </button>
+            <div class="sidebar-group-body hidden">
+              <nav class="sidebar-nav">
+                <button class="dashboard-nav-button" data-panel="packet" type="button">
+                  <span class="sidebar-nav-icon">PC</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Packet Capture (PCAP)</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="bandwidth" type="button">
+                  <span class="sidebar-nav-icon">BW</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Bandwidth/Speed Test</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="snmp" type="button">
+                  <span class="sidebar-nav-icon">SN</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">SNMP Queries</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="multihost" type="button">
+                  <span class="sidebar-nav-icon">MH</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Multi-host Monitoring</span>
+                    </span>
+                  </span>
+                </button>
+              </nav>
+            </div>
+          </section>
+
+          <section class="sidebar-group">
+            <button class="sidebar-group-toggle" type="button" aria-expanded="false">
+              <span class="sidebar-group-copy">
+                <span class="sidebar-group-icon">IF</span>
+                <span class="sidebar-label">Infrastructure</span>
+              </span>
+            </button>
+            <div class="sidebar-group-body hidden">
+              <nav class="sidebar-nav">
+                <button class="dashboard-nav-button" data-panel="geolocation" type="button">
+                  <span class="sidebar-nav-icon">GE</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">IP Geolocation</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="macvendor" type="button">
+                  <span class="sidebar-nav-icon">MA</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">MAC Address Vendor Lookup</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="ipv6" type="button">
+                  <span class="sidebar-nav-icon">I6</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">IPv6 Support</span>
+                    </span>
+                  </span>
+                </button>
+              </nav>
+            </div>
+          </section>
+
+          <section class="sidebar-group">
+            <button class="sidebar-group-toggle" type="button" aria-expanded="false">
+              <span class="sidebar-group-copy">
+                <span class="sidebar-group-icon">RX</span>
+                <span class="sidebar-label">Reporting & Analytics</span>
+              </span>
+            </button>
+            <div class="sidebar-group-body hidden">
+              <nav class="sidebar-nav">
+                <button class="dashboard-nav-button" data-panel="logging" type="button">
+                  <span class="sidebar-nav-icon">LG</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Logging System</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="export" type="button">
+                  <span class="sidebar-nav-icon">EX</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Export Results (JSON/CSV)</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="visualization" type="button">
+                  <span class="sidebar-nav-icon">VZ</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Visualization (Graphs/Charts)</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="scheduler" type="button">
+                  <span class="sidebar-nav-icon">SC</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Scheduler/Automation</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="dashboard-view" type="button">
+                  <span class="sidebar-nav-icon">DB</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Dashboard View</span>
+                    </span>
+                  </span>
+                </button>
+              </nav>
+            </div>
+          </section>
+
+          <section class="sidebar-group">
+            <button class="sidebar-group-toggle" type="button" aria-expanded="false">
+              <span class="sidebar-group-copy">
+                <span class="sidebar-group-icon">IT</span>
+                <span class="sidebar-label">Integration</span>
+              </span>
+            </button>
+            <div class="sidebar-group-body hidden">
+              <nav class="sidebar-nav">
+                <button class="dashboard-nav-button" data-panel="api" type="button">
+                  <span class="sidebar-nav-icon">AP</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">API Mode</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="plugins" type="button">
+                  <span class="sidebar-nav-icon">PG</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Plugin System</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="gui" type="button">
+                  <span class="sidebar-nav-icon">GUI</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Cross-Platform GUI/CLI Hybrid</span>
+                    </span>
+                  </span>
+                </button>
+                <button class="dashboard-nav-button" data-panel="mobile" type="button">
+                  <span class="sidebar-nav-icon">MB</span>
+                  <span class="sidebar-nav-body">
+                    <span class="sidebar-nav-title-row">
+                      <span class="sidebar-nav-title">Mobile-Friendly Output</span>
+                    </span>
+                  </span>
+                </button>
+              </nav>
+            </div>
+          </section>
+        </div>
+      </aside>
+
+      <div class="dashboard-content">
+        <section id="dashboard-overview" class="dashboard-overview">
+          <div class="command-bar command-bar-cyber">
+            <div class="command-bar-main">
+              <div class="command-bar-copy">
+                <p class="command-bar-label">NetWatcher Control Plane</p>
+                <h2>Network Operations Overview</h2>
+              </div>
+              <div class="command-runtime">
+                <span id="command-mode-pill" class="command-pill">ICMP Ping</span>
+                <span id="command-health-pill" class="command-pill command-pill-muted">Runtime checking</span>
+                <span id="overview-clock" class="command-pill command-pill-muted">--:--:--</span>
+              </div>
+            </div>
+
+            <div class="command-bar-actions">
+              <div class="command-target-shell">
+                <input id="command-target" type="text" placeholder="Set active target" />
+                <button id="command-run" class="primary" type="button">Run Active Tool</button>
+              </div>
+              <div class="command-shortcuts">
+                <button class="ghost command-panel-button" data-panel="ping" type="button">Diagnostics</button>
+                <button class="ghost command-panel-button" data-panel="history" type="button">History</button>
+                <button class="ghost command-panel-button" data-panel="alerts" type="button">Alerts</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="overview-kpi-strip">
+            <article class="overview-kpi-chip">
+              <span class="overview-kpi-chip-label">Tracked Targets</span>
+              <strong id="overview-live-targets">0</strong>
+              <small id="overview-live-targets-copy">Awaiting telemetry</small>
+            </article>
+            <article class="overview-kpi-chip overview-kpi-chip-critical">
+              <span class="overview-kpi-chip-label">Critical</span>
+              <strong id="overview-critical-total">0</strong>
+              <small>targets</small>
+            </article>
+            <article class="overview-kpi-chip overview-kpi-chip-warning">
+              <span class="overview-kpi-chip-label">Warning</span>
+              <strong id="overview-warning-total">0</strong>
+              <small>targets</small>
+            </article>
+            <article class="overview-kpi-chip overview-kpi-chip-healthy">
+              <span class="overview-kpi-chip-label">Stable</span>
+              <strong id="overview-stable-total">0</strong>
+              <small>targets</small>
+            </article>
+            <article class="overview-kpi-chip overview-kpi-chip-streaming">
+              <span class="overview-kpi-chip-label">Streaming</span>
+              <strong id="overview-streaming-total">0</strong>
+              <small>active runs</small>
+            </article>
+          </div>
+
+          <div class="overview-hero-grid">
+            <section class="overview-panel overview-hero-panel overview-panel-drilldown" data-drilldown-panel="history" data-drilldown-uses-target="true">
+              <div class="overview-panel-head">
+                <div>
+                  <p class="kpi-label">Overview Pulse</p>
+                  <h3>Network Response Timeline</h3>
+                </div>
+                <span id="overview-latency-state" class="command-pill command-pill-muted">No samples</span>
+              </div>
+
+              <div class="overview-hero-chart-shell">
+                <article class="overview-stack-card">
+                  <div class="overview-stack-card-head">
+                    <span>Latency Window</span>
+                    <small>Live trend</small>
+                  </div>
+                  <div class="latency-strip-shell latency-strip-shell-hero">
+                    <canvas id="overview-latency-strip"></canvas>
+                  </div>
+                  <div class="latency-strip-metrics">
+                    <article class="latency-strip-metric">
+                      <span>Peak</span>
+                      <strong id="overview-latency-peak">-</strong>
+                    </article>
+                    <article class="latency-strip-metric">
+                      <span>Floor</span>
+                      <strong id="overview-latency-floor">-</strong>
+                    </article>
+                    <article class="latency-strip-metric">
+                      <span>Median</span>
+                      <strong id="overview-latency-median">-</strong>
+                    </article>
+                  </div>
+                </article>
+
+                <article class="overview-stack-card">
+                  <div class="overview-stack-card-head">
+                    <span>Incident Timeline</span>
+                    <small>Critical vs warning pressure</small>
+                  </div>
+                  <div class="incident-timeline-shell incident-timeline-shell-embedded">
+                    <canvas id="incident-timeline-chart"></canvas>
+                  </div>
+                </article>
+              </div>
+            </section>
+
+            <section class="overview-panel overview-summary-panel overview-panel-drilldown" data-drilldown-panel="alerts">
+              <div class="overview-panel-head">
+                <div>
+                  <p class="kpi-label">Live Command Summary</p>
+                  <h3>Target Health Distribution</h3>
+                </div>
+                <span id="overview-session-tag" class="command-pill command-pill-muted">Session pending</span>
+              </div>
+
+              <div class="runtime-panel-body overview-runtime-body">
+                <div id="runtime-ring" class="runtime-ring runtime-ring-neutral">
+                  <div class="runtime-ring-core">
+                    <span id="kpi-runtime-status">Checking</span>
+                    <small>stack</small>
+                  </div>
+                </div>
+
+                <div class="runtime-panel-copy">
+                  <p id="kpi-runtime-copy" class="kpi-copy">Validating stack health.</p>
+                  <div class="overview-mini-stats">
+                    <article class="mini-stat">
+                      <span class="mini-stat-label">Alert Rules</span>
+                      <strong id="kpi-alert-rules">0</strong>
+                    </article>
+                    <article class="mini-stat">
+                      <span class="mini-stat-label">Live Monitors</span>
+                      <strong id="kpi-live-monitors">0</strong>
+                    </article>
+                    <article class="mini-stat">
+                      <span class="mini-stat-label">Last RTT</span>
+                      <strong id="kpi-last-rtt">-</strong>
+                    </article>
+                  </div>
+                </div>
+              </div>
+
+              <div class="summary-visual-shell">
+                <div class="summary-donut-shell">
+                  <canvas id="overview-health-donut"></canvas>
+                </div>
+                <div class="overview-side-stack">
+                  <article class="summary-stack-card">
+                    <span class="summary-stack-label">Alert Posture</span>
+                    <strong id="kpi-alert-copy">No threshold rules loaded yet.</strong>
+                  </article>
+                  <article class="summary-stack-card">
+                    <span class="summary-stack-label">Monitor Activity</span>
+                    <strong id="kpi-monitor-copy">No recent monitor activity.</strong>
+                  </article>
+                  <article class="summary-stack-card">
+                    <span class="summary-stack-label">Last Telemetry</span>
+                    <strong id="kpi-rtt-copy">Awaiting telemetry from a probe.</strong>
+                  </article>
+                  <article class="summary-stack-card">
+                    <span class="summary-stack-label">Active Target</span>
+                    <strong id="overview-focus-target">No target selected</strong>
+                  </article>
+                </div>
+              </div>
+
+              <div class="runtime-chart-shell">
+                <div class="runtime-chart-head">
+                  <span>Dependency Summary</span>
+                  <small>Live stack bars</small>
+                </div>
+                <canvas id="runtime-summary-chart"></canvas>
+              </div>
+
+              <article class="summary-stack-card summary-stack-card-event summary-stack-card-event-wide">
+                <div class="summary-stack-head">
+                  <span class="summary-stack-label">Latest Event</span>
+                  <span id="overview-last-event-stamp" class="summary-stack-stamp">--:--:--</span>
+                </div>
+                <strong id="overview-last-event-title">No live event yet</strong>
+                <p id="overview-last-event-copy" class="summary-stack-copy">Telemetry and incident transitions will appear here.</p>
+                <div class="summary-stack-meta-row">
+                  <span class="summary-stack-label">Feed Buffer</span>
+                  <strong id="overview-feed-buffer">0 buffered events</strong>
+                </div>
+              </article>
+            </section>
+          </div>
+
+          <div class="overview-lower-grid">
+            <section class="overview-panel overview-heatmap-panel overview-panel-drilldown" data-drilldown-panel="history" data-drilldown-uses-target="true">
+              <div class="overview-panel-head">
+                <div>
+                  <p class="kpi-label">Threat Matrix</p>
+                  <h3>Target Exposure Grid</h3>
+                </div>
+                <span id="overview-matrix-summary" class="command-pill command-pill-muted">Awaiting telemetry</span>
+              </div>
+
+              <div id="overview-matrix" class="overview-matrix"></div>
+              <div class="overview-density-shell">
+                <div class="overview-density-head">
+                  <span>Uptime / Loss Density</span>
+                  <small>Live posture history</small>
+                </div>
+                <canvas id="overview-density-strip"></canvas>
+              </div>
+            </section>
+
+            <section class="overview-panel overview-incident-panel overview-panel-drilldown" data-drilldown-panel="alerts">
+              <div class="overview-panel-head">
+                <div>
+                  <p class="kpi-label">Incident Summary</p>
+                  <h3>Alert Pressure</h3>
+                </div>
+                <span id="incident-summary-pill" class="command-pill command-pill-muted">No incidents</span>
+              </div>
+
+              <div class="incident-panel-body">
+                <div id="incident-ring" class="incident-ring">
+                  <div class="incident-ring-core">
+                    <span id="incident-total">0</span>
+                    <small>targets</small>
+                  </div>
+                </div>
+
+                <div class="incident-ledger">
+                  <article class="incident-ledger-row incident-ledger-critical">
+                    <div class="incident-ledger-head">
+                      <span>Critical</span>
+                      <strong id="incident-critical-count">0</strong>
+                    </div>
+                    <div class="incident-ledger-bar"><span id="incident-critical-bar"></span></div>
+                  </article>
+                  <article class="incident-ledger-row incident-ledger-warning">
+                    <div class="incident-ledger-head">
+                      <span>Warning</span>
+                      <strong id="incident-warning-count">0</strong>
+                    </div>
+                    <div class="incident-ledger-bar"><span id="incident-warning-bar"></span></div>
+                  </article>
+                  <article class="incident-ledger-row incident-ledger-healthy">
+                    <div class="incident-ledger-head">
+                      <span>Stable</span>
+                      <strong id="incident-healthy-count">0</strong>
+                    </div>
+                    <div class="incident-ledger-bar"><span id="incident-healthy-bar"></span></div>
+                  </article>
+                  <article class="incident-ledger-row incident-ledger-running">
+                    <div class="incident-ledger-head">
+                      <span>Streaming</span>
+                      <strong id="incident-running-count">0</strong>
+                    </div>
+                    <div class="incident-ledger-bar"><span id="incident-running-bar"></span></div>
+                  </article>
+                </div>
+              </div>
+
+              <div class="incident-hotlist-shell">
+                <div class="incident-hotlist-head">
+                  <span>Active Incident Feed</span>
+                  <small>Click to drill down</small>
+                </div>
+                <div id="incident-hotlist" class="incident-hotlist"></div>
+              </div>
+            </section>
+
+            <section class="overview-panel overview-protocol-panel overview-panel-drilldown" data-drilldown-panel="ping" data-drilldown-uses-target="true">
+              <div class="overview-panel-head">
+                <div>
+                  <p class="kpi-label">Protocol Watch</p>
+                  <h3>Ops Traffic</h3>
+                </div>
+                <span id="protocol-summary-pill" class="command-pill command-pill-muted">Idle feed</span>
+              </div>
+
+              <div class="protocol-visuals">
+                <div class="protocol-donut-shell">
+                  <canvas id="protocol-donut-chart"></canvas>
+                </div>
+                <div id="protocol-bars" class="protocol-bars"></div>
+              </div>
+              <div id="telemetry-feed" class="telemetry-feed"></div>
+            </section>
+          </div>
+
+          <section class="overview-panel overview-targets-panel overview-targets-panel-wide overview-panel-drilldown" data-drilldown-panel="history" data-drilldown-uses-target="true">
+            <div class="overview-panel-head">
+              <div>
+                <p class="kpi-label">Target Table</p>
+                <h3>Top Targets</h3>
+              </div>
+            </div>
+
+            <div class="overview-targets-shell">
+              <div class="overview-targets-head">
+                <span>Recent activity</span>
+                <small>Click a row to drill down</small>
+              </div>
+              <div class="overview-targets-table-wrap">
+                <table class="overview-targets-table">
+                  <thead>
+                    <tr>
+                      <th>Target</th>
+                      <th>Mode</th>
+                      <th>State</th>
+                      <th>Last RTT</th>
+                    </tr>
+                  </thead>
+                  <tbody id="overview-targets-body"></tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+          <section class="live-monitor-shell live-monitor-shell-cyber">
+            <div class="page-header live-monitor-header">
+              <div>
+                <h2>Live Monitor Grid</h2>
+                <p>Recent target activity with last state, latency, and probe context.</p>
+              </div>
+              <div class="page-actions">
+                <button id="monitor-clear" class="ghost" type="button">Clear Grid</button>
+              </div>
+            </div>
+
+            <div id="monitor-empty" class="empty-state">No active monitor cards yet. Run diagnostics to seed the grid.</div>
+            <div id="monitor-grid" class="monitor-grid hidden"></div>
+          </section>
+        </section>
+
+        <section id="diagnostics-panel" class="dashboard-section diagnostics-section">
+          <div class="diagnostics-grid">
+            <section class="form diagnostics-toolbar">
+              <div class="diagnostics-toolbar-head">
+                <div class="field toolbar-target-field">
+                  <label for="host">Target Host</label>
+                  <input id="host" type="text" placeholder="example.com or 8.8.8.8" />
+                </div>
+
+                <div class="toolbar-action-shell">
+                  <div class="actions toolbar-actions">
+                    <button id="run" class="primary">Run Diagnostics</button>
+                    <button id="stop" class="secondary" disabled>Stop</button>
+                  </div>
+                  <div id="hint" class="hint toolbar-hint">ICMP ping may require admin/root permission.</div>
+                </div>
+              </div>
+
+              <div class="diagnostics-toolbar-grid">
+              <div class="row toolbar-params">
+                <div id="tcp-port-field" class="field">
+                  <label for="port">Port (TCP)</label>
+                  <input id="port" type="number" min="1" max="65535" value="443" />
+                </div>
+                <div id="count-field" class="field">
+                  <label for="count">Count</label>
+                  <input id="count" type="number" min="1" max="50" value="4" />
+                </div>
+              </div>
+
+              <div id="scan-fields" class="row hidden">
+                <div class="field">
+                  <label for="ports">Ports / Ranges</label>
+                  <input id="ports" type="text" value="22,80,443,8080" placeholder="22,80,443,8000-8100" />
+                </div>
+                <div class="field">
+                  <label for="concurrency">Concurrency</label>
+                  <input id="concurrency" type="number" min="1" max="256" value="64" />
+                </div>
+              </div>
+
+              <div class="row">
+                <div id="interval-field" class="field">
+                  <label for="interval">Interval (ms)</label>
+                  <input id="interval" type="number" min="100" value="1000" />
+                </div>
+                <div id="timeout-field" class="field">
+                  <label for="timeout">Timeout (ms)</label>
+                  <input id="timeout" type="number" min="100" value="2000" />
+                </div>
+                <div id="size-field" class="field">
+                  <label for="size">Payload Size</label>
+                  <input id="size" type="number" min="8" value="32" />
+                </div>
+              </div>
+
+              <div class="row options toolbar-options">
+                <label id="ipv6-option" class="checkbox">
+                  <input id="ipv6" type="checkbox" />
+                  <span>Force IPv6</span>
+                </label>
+              </div>
+              </div>
+            </section>
+
+            <section class="results results-terminal">
+              <div class="results-header">
+                <div>
+                  <h2>Results</h2>
+                  <p>Split-terminal telemetry stream with operator context and live event notes.</p>
+                </div>
+                <span id="status" class="status">Idle</span>
+              </div>
+
+              <div class="results-terminal-grid">
+                <div class="results-terminal-main">
+                  <div id="chart-card" class="chart-card terminal-chart-card">
+                    <div class="chart-head">
+                      <h3>Latency (ms)</h3>
+                      <span id="chart-label">Realtime</span>
+                    </div>
+                    <canvas id="chart"></canvas>
+                  </div>
+
+                  <div class="table-wrap terminal-table-wrap">
+                    <table class="terminal-table">
+                      <thead>
+                        <tr>
+                          <th id="results-col-1">Seq</th>
+                          <th id="results-col-2">Status</th>
+                          <th id="results-col-3">RTT</th>
+                          <th id="results-col-4">Addr</th>
+                        </tr>
+                      </thead>
+                      <tbody id="results"></tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <aside class="results-side-rail">
+                  <article class="terminal-rail-card terminal-context-card">
+                    <div class="terminal-rail-head">
+                      <span>Run Context</span>
+                      <span id="terminal-run-state" class="terminal-state-badge terminal-state-idle">idle</span>
+                    </div>
+                    <div class="terminal-context-grid">
+                      <div>
+                        <span>Target</span>
+                        <strong id="terminal-run-target">-</strong>
+                      </div>
+                      <div>
+                        <span>Mode</span>
+                        <strong id="terminal-run-mode">ICMP Ping</strong>
+                      </div>
+                      <div>
+                        <span>Protocol</span>
+                        <strong id="terminal-run-protocol">icmp</strong>
+                      </div>
+                      <div>
+                        <span>Updated</span>
+                        <strong id="terminal-run-updated">Awaiting run</strong>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article class="terminal-rail-card">
+                    <div class="terminal-rail-head">
+                      <span>Telemetry Summary</span>
+                      <span id="terminal-summary-state" class="terminal-state-badge terminal-state-idle">idle</span>
+                    </div>
+                    <div id="summary" class="summary terminal-summary"></div>
+                    <div id="error" class="error hidden"></div>
+                  </article>
+
+                  <article class="terminal-rail-card">
+                    <div class="terminal-rail-head">
+                      <span>Latest Event</span>
+                      <span id="terminal-event-stamp" class="terminal-stamp">--:--:--</span>
+                    </div>
+                    <div class="terminal-event-shell">
+                      <strong id="terminal-event-title">Awaiting telemetry</strong>
+                      <p id="terminal-event-copy">Run a probe to stream live events and state changes into this rail.</p>
+                    </div>
+                  </article>
+
+                  <div class="terminal-stats-grid">
+                    <article class="terminal-stat-card">
+                      <span>Events</span>
+                      <strong id="terminal-stat-events">0</strong>
+                    </article>
+                    <article class="terminal-stat-card">
+                      <span>Signal</span>
+                      <strong id="terminal-stat-signal">idle</strong>
+                    </article>
+                    <article class="terminal-stat-card">
+                      <span>Last RTT</span>
+                      <strong id="terminal-stat-last">-</strong>
+                    </article>
+                    <article class="terminal-stat-card">
+                      <span>Feed State</span>
+                      <strong id="terminal-stat-feed">cold</strong>
+                    </article>
+                  </div>
+                </aside>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="history-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header">
+            <div>
+              <h2>History</h2>
+              <p>Review recent probe history for the current target and mode.</p>
+            </div>
+            <div class="page-actions">
+              <button id="history-refresh" class="ghost" type="button">Refresh</button>
+              <button id="history-export-json" class="ghost action-link hidden" type="button">Export JSON</button>
+              <button id="history-export-csv" class="ghost action-link hidden" type="button">Export CSV</button>
+            </div>
+          </div>
+
+          <div id="history-context" class="panel-context">No target selected yet.</div>
+          <div id="history-empty" class="empty-state">Run a diagnostic or set a target first. History is available for ICMP Ping and TCP Ping.</div>
+
+          <div id="history-table-wrap" class="table-wrap hidden">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Seq</th>
+                  <th>RTT</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="history-results"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="alerts-panel" class="alerts-panel dashboard-section hidden">
+        <div class="alerts-header">
+          <div>
+            <h2>Alert Rules</h2>
+            <p>Email notifications for latency, loss, and recovery thresholds.</p>
+          </div>
+          <button id="alert-prefill" class="ghost" type="button">Use Current Target</button>
         </div>
 
-        <div class="row">
-          <div id="tcp-port-field" class="field">
-            <label for="port">Port (TCP)</label>
-            <input id="port" type="number" min="1" max="65535" value="443" />
-          </div>
-          <div id="count-field" class="field">
-            <label for="count">Count</label>
-            <input id="count" type="number" min="1" max="50" value="4" />
+        <div id="alerts-notice" class="alerts-notice hidden"></div>
+
+        <div class="alerts-grid">
+          <form id="alert-form" class="alerts-form">
+            <div class="row">
+              <div class="field">
+                <label for="alert-name">Rule Name</label>
+                <input id="alert-name" type="text" placeholder="Critical API latency" />
+              </div>
+              <div class="field">
+                <label for="alert-protocol">Protocol</label>
+                <select id="alert-protocol">
+                  <option value="ping">ICMP Ping</option>
+                  <option value="tcpping">TCP Ping</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="row">
+              <div class="field">
+                <label for="alert-target">Target</label>
+                <input id="alert-target" type="text" placeholder="example.com" />
+              </div>
+              <div id="alert-port-field" class="field">
+                <label for="alert-port">Port</label>
+                <input id="alert-port" type="number" min="1" max="65535" value="443" />
+              </div>
+            </div>
+
+            <div class="row">
+              <div class="field">
+                <label for="alert-latency-threshold">Latency Threshold (ms)</label>
+                <input id="alert-latency-threshold" type="number" min="1" placeholder="250" />
+              </div>
+              <div class="field">
+                <label for="alert-loss-threshold">Loss Threshold (%)</label>
+                <input id="alert-loss-threshold" type="number" min="0" max="100" step="0.1" placeholder="25" />
+              </div>
+            </div>
+
+            <div class="row">
+              <div class="field">
+                <label for="alert-consecutive">Consecutive Breaches</label>
+                <input id="alert-consecutive" type="number" min="1" max="10" value="1" />
+              </div>
+              <div class="field">
+                <label for="alert-cooldown">Cooldown (minutes)</label>
+                <input id="alert-cooldown" type="number" min="1" max="1440" value="30" />
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="alert-email">Recipient Email</label>
+              <input id="alert-email" type="email" placeholder="alerts@company.com" />
+            </div>
+
+            <div class="row options">
+              <label class="checkbox">
+                <input id="alert-recovery" type="checkbox" checked />
+                <span>Send recovery email</span>
+              </label>
+              <div class="actions">
+                <button id="alert-save" class="primary" type="submit">Save Rule</button>
+              </div>
+            </div>
+          </form>
+
+          <div class="alerts-list-card">
+            <div class="alerts-list-head">
+              <h3>Saved Rules</h3>
+              <span id="alerts-count" class="status">0 rules</span>
+            </div>
+            <div id="alerts-empty" class="alerts-empty">No alert rules yet.</div>
+            <div id="alerts-list" class="alerts-list hidden"></div>
           </div>
         </div>
+        </section>
 
-        <div id="scan-fields" class="row hidden">
-          <div class="field">
-            <label for="ports">Ports / Ranges</label>
-            <input id="ports" type="text" value="22,80,443,8080" placeholder="22,80,443,8000-8100" />
+        <section id="settings-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header">
+            <div>
+              <h2>Settings</h2>
+              <p>Operational health, transport, and deployment runtime.</p>
+            </div>
+            <div class="page-actions">
+              <button id="settings-refresh" class="ghost" type="button">Refresh Status</button>
+            </div>
           </div>
-          <div class="field">
-            <label for="concurrency">Concurrency</label>
-            <input id="concurrency" type="number" min="1" max="256" value="64" />
+
+          <div id="settings-notice" class="auth-notice auth-notice-info hidden"></div>
+
+          <div class="settings-grid">
+            <article class="status-card">
+              <p class="status-card-label">Dashboard Origin</p>
+              <h3 id="settings-origin">-</h3>
+              <p class="status-card-copy">Current active dashboard URL.</p>
+            </article>
+
+            <article class="status-card">
+              <p class="status-card-label">Database</p>
+              <h3 id="settings-db-status">Checking</h3>
+              <p id="settings-db-copy" class="status-card-copy">-</p>
+            </article>
+
+            <article class="status-card">
+              <p class="status-card-label">Redis</p>
+              <h3 id="settings-redis-status">Checking</h3>
+              <p id="settings-redis-copy" class="status-card-copy">-</p>
+            </article>
+
+            <article class="status-card">
+              <p class="status-card-label">Object Storage</p>
+              <h3 id="settings-object-status">Checking</h3>
+              <p id="settings-object-copy" class="status-card-copy">-</p>
+            </article>
+
+            <article class="status-card">
+              <p class="status-card-label">Realtime Transport</p>
+              <h3 id="settings-realtime">WebSocket + HTTP</h3>
+              <p class="status-card-copy">Primary realtime transport with HTTP fallback.</p>
+            </article>
+
+            <article class="status-card">
+              <p class="status-card-label">Current Auth Session</p>
+              <h3 id="settings-session">Active</h3>
+              <p class="status-card-copy">Cookie-backed operator session.</p>
+            </article>
           </div>
-        </div>
+        </section>
 
-        <div class="row">
-          <div id="interval-field" class="field">
-            <label for="interval">Interval (ms)</label>
-            <input id="interval" type="number" min="100" value="1000" />
+        <section id="profile-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header">
+            <div>
+              <h2>Profile</h2>
+              <p>Operator identity, verification state, and account actions.</p>
+            </div>
+            <div class="page-actions">
+              <button id="profile-reset-link" class="ghost" type="button">Send Reset Email</button>
+              <button id="profile-open-alerts" class="ghost" type="button">Open Alerts</button>
+              <button id="profile-logout" class="secondary" type="button">Log Out</button>
+            </div>
           </div>
-          <div id="timeout-field" class="field">
-            <label for="timeout">Timeout (ms)</label>
-            <input id="timeout" type="number" min="100" value="2000" />
+
+          <div id="profile-notice" class="auth-notice auth-notice-info hidden"></div>
+
+          <div class="profile-grid">
+            <article class="profile-card profile-card-main">
+              <p class="status-card-label">Operator</p>
+              <h3 id="profile-name">-</h3>
+              <p id="profile-email" class="status-card-copy">-</p>
+            </article>
+
+            <article class="profile-card">
+              <p class="status-card-label">Verification</p>
+              <h3 id="profile-verification">Verified</h3>
+              <p id="profile-verification-copy" class="status-card-copy">Email verification active.</p>
+            </article>
+
+            <article class="profile-card">
+              <p class="status-card-label">Member Since</p>
+              <h3 id="profile-created">-</h3>
+              <p class="status-card-copy">Account creation timestamp.</p>
+            </article>
+
+            <article class="profile-card">
+              <p class="status-card-label">Session</p>
+              <h3 id="profile-session">Authenticated</h3>
+              <p class="status-card-copy">Protected access to diagnostics and alert management.</p>
+            </article>
           </div>
-          <div id="size-field" class="field">
-            <label for="size">Payload Size</label>
-            <input id="size" type="number" min="8" value="32" />
-          </div>
-        </div>
+        </section>
 
-        <div class="row options">
-          <label id="ipv6-option" class="checkbox">
-            <input id="ipv6" type="checkbox" />
-            <span>Force IPv6</span>
-          </label>
-          <div class="actions">
-            <button id="run" class="primary">Run Diagnostics</button>
-            <button id="stop" class="secondary" disabled>Stop</button>
-          </div>
-        </div>
-
-        <div id="hint" class="hint">ICMP ping may require admin/root permission.</div>
-      </section>
-
-      <section class="results">
-        <div class="results-header">
-          <h2>Results</h2>
-          <span id="status" class="status">Idle</span>
-        </div>
-
-        <div id="chart-card" class="chart-card">
-          <div class="chart-head">
-            <h3>Latency (ms)</h3>
-            <span id="chart-label">Realtime</span>
-          </div>
-          <canvas id="chart"></canvas>
-        </div>
-
-        <div id="summary" class="summary"></div>
-        <div id="error" class="error hidden"></div>
-
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th id="results-col-1">Seq</th>
-                <th id="results-col-2">Status</th>
-                <th id="results-col-3">RTT</th>
-                <th id="results-col-4">Addr</th>
-              </tr>
-            </thead>
-            <tbody id="results"></tbody>
-          </table>
-        </div>
-      </section>
+        <!-- Feature Panels -->
+        <section id="dns-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>DNS Lookup / Reverse DNS</h2><p>Forward, reverse, and resolver diagnostics</p></div></div>
+          <div class="panel-content"><p>DNS Lookup feature coming soon...</p></div>
+        </section>
+        <section id="whois-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>WHOIS Query</h2><p>Domain registration and IP ownership lookup</p></div></div>
+          <div class="panel-content"><p>WHOIS Query feature coming soon...</p></div>
+        </section>
+        <section id="arp-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>ARP Table Viewer</h2><p>MAC address to IP mapping and resolution</p></div></div>
+          <div class="panel-content"><p>ARP Table feature coming soon...</p></div>
+        </section>
+        <section id="netstat-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>Netstat Integration</h2><p>Active connections and socket statistics</p></div></div>
+          <div class="panel-content"><p>Netstat feature coming soon...</p></div>
+        </section>
+        <section id="traceroute-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>Traceroute</h2><p>Hop-by-hop path inspection</p></div></div>
+          <div class="panel-content"><p>Traceroute feature coming soon...</p></div>
+        </section>
+        <section id="pingsweep-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>Ping Sweep / Subnet Scan</h2><p>Subnet discovery and host reachability</p></div></div>
+          <div class="panel-content"><p>Ping Sweep feature coming soon...</p></div>
+        </section>
+        <section id="sslcheck-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>SSL/TLS Certificate Checker</h2><p>Certificate age, issuer, and expiry posture</p></div></div>
+          <div class="panel-content"><p>SSL/TLS Check feature coming soon...</p></div>
+        </section>
+        <section id="httpheaders-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>HTTP Header Analyzer</h2><p>Header posture and response metadata</p></div></div>
+          <div class="panel-content"><p>HTTP Headers feature coming soon...</p></div>
+        </section>
+        <section id="fingerprint-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>Service Fingerprinting</h2><p>Service banners and protocol fingerprints</p></div></div>
+          <div class="panel-content"><p>Service Fingerprinting feature coming soon...</p></div>
+        </section>
+        <section id="firewall-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>Firewall Testing</h2><p>Firewall rule and policy validation</p></div></div>
+          <div class="panel-content"><p>Firewall Testing feature coming soon...</p></div>
+        </section>
+        <section id="natproxy-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>NAT/Proxy Detection</h2><p>Network address translation and proxy identification</p></div></div>
+          <div class="panel-content"><p>NAT/Proxy Detection feature coming soon...</p></div>
+        </section>
+        <section id="packet-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>Packet Capture (PCAP)</h2><p>PCAP session capture and export flows</p></div></div>
+          <div class="panel-content"><p>Packet Capture feature coming soon...</p></div>
+        </section>
+        <section id="bandwidth-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>Bandwidth/Speed Test</h2><p>Throughput measurement and saturation checks</p></div></div>
+          <div class="panel-content"><p>Bandwidth Test feature coming soon...</p></div>
+        </section>
+        <section id="snmp-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>SNMP Queries</h2><p>Infrastructure polling and health collection</p></div></div>
+          <div class="panel-content"><p>SNMP Queries feature coming soon...</p></div>
+        </section>
+        <section id="multihost-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>Multi-host Monitoring</h2><p>Batch monitoring and distributed endpoint checks</p></div></div>
+          <div class="panel-content"><p>Multi-host Monitoring feature coming soon...</p></div>
+        </section>
+        <section id="geolocation-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>IP Geolocation</h2><p>Geographic location and ASN information</p></div></div>
+          <div class="panel-content"><p>IP Geolocation feature coming soon...</p></div>
+        </section>
+        <section id="macvendor-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>MAC Address Vendor Lookup</h2><p>Hardware manufacturer identification and details</p></div></div>
+          <div class="panel-content"><p>MAC Vendor Lookup feature coming soon...</p></div>
+        </section>
+        <section id="ipv6-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>IPv6 Support</h2><p>Full IPv6 protocol and address diagnostics</p></div></div>
+          <div class="panel-content"><p>IPv6 Support feature coming soon...</p></div>
+        </section>
+        <section id="logging-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>Logging System</h2><p>Centralized event and activity logging</p></div></div>
+          <div class="panel-content"><p>Logging System feature coming soon...</p></div>
+        </section>
+        <section id="export-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>Export Results (JSON/CSV)</h2><p>Data export and bulk result downloads</p></div></div>
+          <div class="panel-content"><p>Export Results feature coming soon...</p></div>
+        </section>
+        <section id="visualization-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>Visualization (Graphs/Charts)</h2><p>Performance metrics and trend analysis</p></div></div>
+          <div class="panel-content"><p>Visualization feature coming soon...</p></div>
+        </section>
+        <section id="scheduler-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>Scheduler/Automation</h2><p>Task scheduling and workflow automation</p></div></div>
+          <div class="panel-content"><p>Scheduler/Automation feature coming soon...</p></div>
+        </section>
+        <section id="dashboard-view-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>Dashboard View</h2><p>Customizable metrics and KPI displays</p></div></div>
+          <div class="panel-content"><p>Dashboard View feature coming soon...</p></div>
+        </section>
+        <section id="api-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>API Mode</h2><p>RESTful API and programmatic access</p></div></div>
+          <div class="panel-content"><p>API Mode feature coming soon...</p></div>
+        </section>
+        <section id="plugins-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>Plugin System</h2><p>Extensible plugin architecture</p></div></div>
+          <div class="panel-content"><p>Plugin System feature coming soon...</p></div>
+        </section>
+        <section id="gui-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>Cross-Platform GUI/CLI Hybrid</h2><p>Native GUI and command-line interfaces</p></div></div>
+          <div class="panel-content"><p>GUI/CLI Hybrid feature coming soon...</p></div>
+        </section>
+        <section id="mobile-panel" class="dashboard-section page-panel hidden">
+          <div class="page-header"><div><h2>Mobile-Friendly Output</h2><p>Responsive design for mobile devices</p></div></div>
+          <div class="panel-content"><p>Mobile-Friendly feature coming soon...</p></div>
+        </section>
+      </div>
     </main>
 
     <footer class="footer">
@@ -128,6 +1437,6 @@
     </footer>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=20260322-41"></script>
 </body>
 </html>
