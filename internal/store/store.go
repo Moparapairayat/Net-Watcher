@@ -64,6 +64,13 @@ type HistoryPoint struct {
 	Error string   `json:"error,omitempty"`
 }
 
+type RecentHistoryTarget struct {
+	Protocol     string `json:"protocol"`
+	Target       string `json:"target"`
+	Port         int    `json:"port,omitempty"`
+	LastSampleAt int64  `json:"last_sample_at"`
+}
+
 func Open(path string) (*Store, error) {
 	return OpenWithConfig(path, Config{})
 }
@@ -306,6 +313,45 @@ func (s *Store) QueryHistory(userID int64, protocol, target string, port int, li
 	}
 
 	return points, rows.Err()
+}
+
+func (s *Store) QueryRecentHistoryTargets(userID int64, limit int) ([]RecentHistoryTarget, error) {
+	if s == nil {
+		return nil, nil
+	}
+	if userID <= 0 {
+		return nil, fmt.Errorf("user id is required")
+	}
+	if limit <= 0 {
+		limit = 12
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	query := fmt.Sprintf(`SELECT protocol, target, COALESCE(port, 0), CAST(EXTRACT(EPOCH FROM MAX(ts)) * 1000 AS BIGINT)
+		FROM %s
+		WHERE user_id = $1
+		GROUP BY protocol, target, port
+		ORDER BY MAX(ts) DESC
+		LIMIT $2`, s.tableRef())
+
+	rows, err := s.db.Query(query, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	targets := make([]RecentHistoryTarget, 0, limit)
+	for rows.Next() {
+		var item RecentHistoryTarget
+		if err := rows.Scan(&item.Protocol, &item.Target, &item.Port, &item.LastSampleAt); err != nil {
+			return nil, err
+		}
+		targets = append(targets, item)
+	}
+
+	return targets, rows.Err()
 }
 
 func (s *Store) deleteOlderThan(cutoff time.Time) error {

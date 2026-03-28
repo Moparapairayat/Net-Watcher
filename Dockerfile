@@ -17,7 +17,6 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=build /out/netwatcher /app/netwatcher
-COPY web /app/web
 
 EXPOSE 8080
 

@@ -83,6 +83,47 @@ func TestStoreRetentionCleanupRemovesExpiredRows(t *testing.T) {
 	})
 }
 
+func TestStoreQueryRecentHistoryTargets(t *testing.T) {
+	st := openTestStore(t, Config{
+		BatchSize:     1,
+		FlushInterval: 5 * time.Millisecond,
+	})
+	const userID int64 = 303
+
+	now := time.Now()
+	st.InsertAsync(ResultRecord{
+		UserID:   userID,
+		Ts:       now.Add(-2 * time.Minute),
+		Protocol: "ping",
+		Target:   "one.example",
+		Seq:      1,
+		RttMs:    float64Ptr(9),
+	})
+	st.InsertAsync(ResultRecord{
+		UserID:   userID,
+		Ts:       now.Add(-time.Minute),
+		Protocol: "tcpping",
+		Target:   "two.example",
+		Port:     443,
+		Seq:      1,
+		RttMs:    float64Ptr(14),
+	})
+
+	var targets []RecentHistoryTarget
+	waitFor(t, time.Second, func() bool {
+		var err error
+		targets, err = st.QueryRecentHistoryTargets(userID, 10)
+		return err == nil && len(targets) == 2
+	})
+
+	if targets[0].Protocol != "tcpping" || targets[0].Target != "two.example" || targets[0].Port != 443 {
+		t.Fatalf("unexpected most recent target: %#v", targets[0])
+	}
+	if targets[1].Protocol != "ping" || targets[1].Target != "one.example" {
+		t.Fatalf("unexpected older target: %#v", targets[1])
+	}
+}
+
 func openTestStore(t *testing.T, cfg Config) *Store {
 	t.Helper()
 

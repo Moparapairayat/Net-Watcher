@@ -1,8 +1,12 @@
 # Net-Watcher
 
-Net-Watcher is a self-hosted network diagnostics toolkit built with Go. It combines a CLI, a local web server, realtime probe streaming, and a production stack built around PostgreSQL/TimescaleDB, Redis, and S3-compatible object storage.
+Net-Watcher is a self-hosted network diagnostics toolkit built with Go and a Next.js frontend. It combines a CLI, a backend API/probe engine, realtime probe streaming, and a production stack built around PostgreSQL/TimescaleDB, Redis, and S3-compatible object storage.
 
-Developer: MOPARA PAIR AYAT
+
+## Contributors
+
+- MOPARA PAIR AYAT — Developer
+- Additional contributors can be listed here
 
 ## Overview
 
@@ -28,7 +32,9 @@ Core capabilities:
 ## Architecture
 
 - `cmd/netwatcher`
-  CLI entrypoint and web server
+  CLI entrypoint and backend API/probe server
+- `frontend`
+  primary Next.js frontend
 - `internal/cache`
   Redis cache integration
 - `internal/objectstore`
@@ -43,20 +49,20 @@ Core capabilities:
   PostgreSQL/TimescaleDB persistence, batching, retention
 - `internal/portscan`
   TCP connect port scanning
-- `web`
-  frontend assets for the dashboard
 - `deploy`
   production `docker-compose` stack
 
 ## Tech Stack
 
 - Go
+- Next.js
+- TypeScript
 - PostgreSQL
 - TimescaleDB
 - Redis
 - S3-compatible object storage
 - Gorilla WebSocket
-- Vanilla HTML, CSS, JavaScript
+- Tailwind CSS
 
 ## Features
 
@@ -94,13 +100,14 @@ Core capabilities:
 ```powershell
 go mod tidy
 go build -o netwatcher.exe .\cmd\netwatcher
-.\netwatcher.exe serve --listen 127.0.0.1:8080 --static .\web --db-dsn "postgres://netwatcher:change-me@127.0.0.1:5432/netwatcher?sslmode=disable" --timescale
+.\netwatcher.exe serve --listen 127.0.0.1:8080 --db-dsn "postgres://netwatcher:change-me@127.0.0.1:5432/netwatcher?sslmode=disable" --timescale
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:8080
+backend: http://127.0.0.1:8080
+frontend: http://127.0.0.1:3000
 ```
 
 ### Linux
@@ -108,13 +115,14 @@ http://127.0.0.1:8080
 ```bash
 go mod tidy
 go build -o netwatcher ./cmd/netwatcher
-./netwatcher serve --listen 127.0.0.1:8080 --static ./web --db-dsn "postgres://netwatcher:change-me@127.0.0.1:5432/netwatcher?sslmode=disable" --timescale
+./netwatcher serve --listen 127.0.0.1:8080 --db-dsn "postgres://netwatcher:change-me@127.0.0.1:5432/netwatcher?sslmode=disable" --timescale
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:8080
+backend: http://127.0.0.1:8080
+frontend: http://127.0.0.1:3000
 ```
 
 For ICMP on Linux, root or `CAP_NET_RAW` may be required:
