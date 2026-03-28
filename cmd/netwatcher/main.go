@@ -19,7 +19,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +30,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"netwatcher/internal/cache"
+	"netwatcher/internal/dnslookup"
 	"netwatcher/internal/mailer"
 	"netwatcher/internal/objectstore"
 	"netwatcher/internal/ping"
@@ -96,6 +96,8 @@ func main() {
 		runTCPPing(os.Args[2:])
 	case "portscan":
 		runPortScan(os.Args[2:])
+	case "dns":
+		runDNSLookup(os.Args[2:])
 	case "serve":
 		runServe(os.Args[2:])
 	case "help", "-h", "--help":
@@ -114,12 +116,14 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  netwatcher ping [flags] <host>")
 	fmt.Fprintln(os.Stderr, "  netwatcher tcpping [flags] <host>[:port]")
 	fmt.Fprintln(os.Stderr, "  netwatcher portscan [flags] <host>")
+	fmt.Fprintln(os.Stderr, "  netwatcher dns [flags] <host-or-ip>")
 	fmt.Fprintln(os.Stderr, "  netwatcher serve [flags]")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Commands:")
 	fmt.Fprintln(os.Stderr, "  ping     ICMP echo (requires root or CAP_NET_RAW)")
 	fmt.Fprintln(os.Stderr, "  tcpping  TCP connect latency")
 	fmt.Fprintln(os.Stderr, "  portscan TCP connect port scan")
+	fmt.Fprintln(os.Stderr, "  dns      DNS lookup / reverse DNS")
 	fmt.Fprintln(os.Stderr, "  serve    Web UI + REST API")
 }
 
@@ -269,12 +273,56 @@ func runPortScan(args []string) {
 	printPortScan(rep, ports)
 }
 
+func runDNSLookup(args []string) {
+	fs := flag.NewFlagSet("dns", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	timeout := fs.Duration("timeout", dnslookup.DefaultTimeout, "per-query timeout")
+	jsonOut := fs.Bool("json", false, "JSON output")
+
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: netwatcher dns [flags] <host-or-ip>")
+		fs.PrintDefaults()
+	}
+
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		os.Exit(2)
+	}
+
+	if fs.NArg() < 1 {
+		fs.Usage()
+		os.Exit(2)
+	}
+
+	target, err := normalizeHost(fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	normalizedTimeout, err := normalizeDNSLookupTimeout(*timeout)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+
+	rep, err := dnslookup.Run(target, dnslookup.Config{Timeout: normalizedTimeout})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		printDNSLookupJSON(rep)
+		return
+	}
+	printDNSLookup(rep)
+}
+
 func runServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
 	listen := fs.String("listen", envString("NETWATCHER_LISTEN", "127.0.0.1:8080"), "listen address")
-	staticDir := fs.String("static", envString("NETWATCHER_STATIC_DIR", "web"), "static directory for UI assets")
 	dbDSN := fs.String("db-dsn", envString("NETWATCHER_DB_DSN", ""), "postgres/timescaledb DSN")
 	dbBatch := fs.Int("db-batch", envInt("NETWATCHER_DB_BATCH", 100), "database batch insert size")
 	dbFlush := fs.Duration("db-flush", envDuration("NETWATCHER_DB_FLUSH", 1*time.Second), "database flush interval")
@@ -300,6 +348,7 @@ func runServe(args []string) {
 	emailFrom := fs.String("email-from", envString("NETWATCHER_EMAIL_FROM", ""), "from address for transactional emails")
 	emailReplyTo := fs.String("email-reply-to", envString("NETWATCHER_EMAIL_REPLY_TO", ""), "reply-to address for transactional emails")
 	publicBaseURL := fs.String("public-base-url", envString("NETWATCHER_PUBLIC_BASE_URL", ""), "public base URL used in emails, for example https://netwatcher.example.com")
+	allowedOriginsRaw := fs.String("allowed-origins", envString("NETWATCHER_ALLOWED_ORIGINS", ""), "comma-separated additional allowed browser origins, for example http://127.0.0.1:3000")
 
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: netwatcher serve [flags]")
@@ -316,7 +365,15 @@ func runServe(args []string) {
 		appObjectStore = nil
 		appMailer = nil
 		appPublicBaseURL = ""
+		appAllowedOrigins = nil
 	}()
+
+	allowedOrigins, err := parseAllowedOrigins(*allowedOriginsRaw)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	appAllowedOrigins = allowedOrigins
 
 	st, err := store.OpenConfigured(store.Config{
 		DSN:              *dbDSN,
@@ -390,6 +447,7 @@ func runServe(args []string) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
+	mux.HandleFunc("/api/healthz", handleHealthz)
 	mux.HandleFunc("/api/auth/session", handleAuthSession)
 	mux.HandleFunc("/api/auth/signup", handleAuthSignup)
 	mux.HandleFunc("/api/auth/login", handleAuthLogin)
@@ -401,11 +459,13 @@ func runServe(args []string) {
 	mux.HandleFunc("/api/ping", handlePing)
 	mux.HandleFunc("/api/tcpping", handleTCPPing)
 	mux.HandleFunc("/api/portscan", handlePortScan)
+	mux.HandleFunc("/api/dnslookup", handleDNSLookup)
 	mux.HandleFunc("/api/history", handleHistory)
+	mux.HandleFunc("/api/history/recent-targets", handleRecentHistoryTargets)
 	mux.HandleFunc("/api/export/history", handleHistoryExport)
 	mux.HandleFunc("/api/alerts/rules", handleAlertRules)
 	mux.HandleFunc("/ws", handleWS)
-	mux.Handle("/", newStaticHandler(*staticDir))
+	mux.Handle("/", newBackendFallbackHandler())
 
 	srv := &http.Server{
 		Addr:              *listen,
@@ -417,7 +477,6 @@ func runServe(args []string) {
 	}
 
 	fmt.Printf("NetWatcher UI listening on http://%s\n", *listen)
-	fmt.Printf("Serving static files from %s\n", *staticDir)
 	fmt.Printf("Database: postgres/timescale\n")
 	fmt.Printf("DB batch=%d flush=%s retention=%s max-open=%d max-idle=%d timescale=%t\n", *dbBatch, dbFlush.String(), dbRetention.String(), *dbMaxOpen, *dbMaxIdle, *timescale)
 	if rc != nil {
@@ -450,58 +509,17 @@ func runServe(args []string) {
 	}
 }
 
-func newStaticHandler(staticDir string) http.Handler {
-	fileServer := http.FileServer(http.Dir(staticDir))
-	indexPath := filepath.Join(staticDir, "index.html")
-	indexRoutes := map[string]struct{}{
-		"/":                       {},
-		"/icmp-ping":              {},
-		"/tcp-ping":               {},
-		"/port-scan":              {},
-		"/history":                {},
-		"/alerts":                 {},
-		"/settings":               {},
-		"/profile":                {},
-		"/dns-lookup":             {},
-		"/whois-query":            {},
-		"/arp-table":              {},
-		"/netstat":                {},
-		"/traceroute":             {},
-		"/ping-sweep":             {},
-		"/ssl-tls-check":          {},
-		"/http-header-analyzer":   {},
-		"/service-fingerprinting": {},
-		"/firewall-testing":       {},
-		"/nat-proxy-detection":    {},
-		"/packet-capture":         {},
-		"/bandwidth-test":         {},
-		"/snmp-queries":           {},
-		"/multi-host-monitoring":  {},
-		"/ip-geolocation":         {},
-		"/mac-vendor-lookup":      {},
-		"/ipv6-support":           {},
-		"/logging-system":         {},
-		"/export-results":         {},
-		"/visualization":          {},
-		"/scheduler":              {},
-		"/dashboard-view":         {},
-		"/api-mode":               {},
-		"/plugin-system":          {},
-		"/gui-cli-hybrid":         {},
-		"/mobile-output":          {},
-		"/login":                  {},
-		"/signup":                 {},
-		"/verify-email":           {},
-		"/forgot-password":        {},
-		"/reset-password":         {},
-	}
-
+func newBackendFallbackHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := indexRoutes[r.URL.Path]; ok {
-			http.ServeFile(w, r, indexPath)
+		if r.URL.Path == "/" {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":      true,
+				"service": "netwatcher-api",
+				"ui":      "serve the Next.js frontend separately or use the frontend-primary Docker stack",
+			})
 			return
 		}
-		fileServer.ServeHTTP(w, r)
+		writeJSON(w, http.StatusNotFound, apiError{Error: "not found"})
 	})
 }
 
@@ -655,6 +673,14 @@ func normalizePortScanRequest(host, portsSpec string, timeout time.Duration, con
 	}, nil
 }
 
+func normalizeDNSLookupTimeout(timeout time.Duration) (time.Duration, error) {
+	normalizedTimeout, err := normalizeProbeTimeout(timeout)
+	if err != nil {
+		return 0, err
+	}
+	return normalizedTimeout, nil
+}
+
 func normalizeHost(host string) (string, error) {
 	host = strings.TrimSpace(host)
 	if host == "" {
@@ -769,6 +795,19 @@ func parseHistoryQuery(values url.Values) (string, string, int, int, error) {
 	}
 
 	return reqType, host, port, limit, nil
+}
+
+func parseRecentHistoryTargetsLimit(values url.Values) (int, error) {
+	limitStr := strings.TrimSpace(values.Get("limit"))
+	if limitStr == "" {
+		return 12, nil
+	}
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit < 1 || limit > 50 {
+		return 0, fmt.Errorf("limit must be 1-50")
+	}
+	return limit, nil
 }
 
 func parseHistoryExportRequest(req historyExportRequest) (string, string, int, int, string, string, error) {
@@ -1006,6 +1045,95 @@ func printPortScanJSON(rep portscan.Report) {
 	_ = enc.Encode(jr)
 }
 
+func printDNSLookup(rep dnslookup.Report) {
+	fmt.Printf("DNS LOOKUP %s\n", rep.Target)
+	fmt.Printf("kind=%s duration=%.1fms\n", rep.Kind, rep.Summary.DurationMs)
+
+	printDNSSection := func(label string, section dnslookup.StringSection) {
+		if len(section.Values) == 0 && section.Error == "" {
+			return
+		}
+		fmt.Printf("%s:\n", label)
+		if len(section.Values) > 0 {
+			for _, value := range section.Values {
+				fmt.Printf("  - %s\n", value)
+			}
+		}
+		if section.Error != "" {
+			fmt.Printf("  ! %s\n", section.Error)
+		}
+	}
+
+	printDNSSection("A", rep.A)
+	printDNSSection("AAAA", rep.AAAA)
+	printDNSSection("CNAME", rep.CNAME)
+	printDNSSection("NS", rep.NS)
+	if len(rep.MX.Records) > 0 || rep.MX.Error != "" {
+		fmt.Println("MX:")
+		for _, record := range rep.MX.Records {
+			fmt.Printf("  - %d %s\n", record.Pref, record.Host)
+		}
+		if rep.MX.Error != "" {
+			fmt.Printf("  ! %s\n", rep.MX.Error)
+		}
+	}
+	printDNSSection("TXT", rep.TXT)
+	if rep.SOA.Record != nil || rep.SOA.Error != "" {
+		fmt.Println("SOA:")
+		if rep.SOA.Record != nil {
+			fmt.Printf("  - ns=%s mbox=%s serial=%d refresh=%d retry=%d expire=%d minttl=%d\n",
+				rep.SOA.Record.NS,
+				rep.SOA.Record.MBox,
+				rep.SOA.Record.Serial,
+				rep.SOA.Record.Refresh,
+				rep.SOA.Record.Retry,
+				rep.SOA.Record.Expire,
+				rep.SOA.Record.MinTTL,
+			)
+		}
+		if rep.SOA.Error != "" {
+			fmt.Printf("  ! %s\n", rep.SOA.Error)
+		}
+	}
+	if len(rep.SRV.Records) > 0 || rep.SRV.Error != "" {
+		fmt.Println("SRV:")
+		for _, record := range rep.SRV.Records {
+			fmt.Printf("  - %d %d %d %s\n", record.Priority, record.Weight, record.Port, record.Target)
+		}
+		if rep.SRV.Error != "" {
+			fmt.Printf("  ! %s\n", rep.SRV.Error)
+		}
+	}
+	if len(rep.CAA.Records) > 0 || rep.CAA.Error != "" {
+		fmt.Println("CAA:")
+		for _, record := range rep.CAA.Records {
+			fmt.Printf("  - flag=%d tag=%s value=%s\n", record.Flag, record.Tag, record.Value)
+		}
+		if rep.CAA.Error != "" {
+			fmt.Printf("  ! %s\n", rep.CAA.Error)
+		}
+	}
+	if len(rep.PTR) > 0 {
+		fmt.Println("PTR:")
+		for _, record := range rep.PTR {
+			if len(record.Names) > 0 {
+				fmt.Printf("  %s\n", record.Address)
+				for _, name := range record.Names {
+					fmt.Printf("    - %s\n", name)
+				}
+				continue
+			}
+			fmt.Printf("  %s ! %s\n", record.Address, record.Error)
+		}
+	}
+}
+
+func printDNSLookupJSON(rep dnslookup.Report) {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(rep)
+}
+
 func formatDuration(d time.Duration) string {
 	ms := float64(d) / float64(time.Millisecond)
 	return fmt.Sprintf("%.3fms", ms)
@@ -1096,6 +1224,11 @@ type portScanRequest struct {
 	Ports       string `json:"ports"`
 	TimeoutMs   int    `json:"timeout_ms"`
 	Concurrency int    `json:"concurrency"`
+}
+
+type dnsLookupRequest struct {
+	Target    string `json:"target"`
+	TimeoutMs int    `json:"timeout_ms"`
 }
 
 type historyExportRequest struct {
@@ -1217,6 +1350,7 @@ var appCache *cache.Cache
 var appObjectStore *objectstore.Client
 var appMailer *mailer.Client
 var appPublicBaseURL string
+var appAllowedOrigins map[string]struct{}
 var probeLimiter = make(chan struct{}, maxConcurrentProbes)
 var rejectedProbeRequests atomic.Uint64
 var authRateLimiter = newRateLimiter()
@@ -2057,11 +2191,7 @@ func buildDashboardURL(r *http.Request, panel string) string {
 	if base != "" {
 		return base
 	}
-	root := fmt.Sprintf("%s://%s/", requestScheme(r), requestHost(r))
-	if panel == "" {
-		return root
-	}
-	return root + "?panel=" + url.QueryEscape(panel)
+	return fmt.Sprintf("%s://%s%s", requestScheme(r), requestHost(r), dashboardRoutePath(panel))
 }
 
 func buildConfiguredDashboardURL(panel string) string {
@@ -2069,10 +2199,32 @@ func buildConfiguredDashboardURL(panel string) string {
 	if base == "" {
 		return ""
 	}
-	if panel == "" {
-		return base + "/"
+	return base + dashboardRoutePath(panel)
+}
+
+func dashboardRoutePath(panel string) string {
+	switch strings.TrimSpace(panel) {
+	case "", "overview":
+		return "/"
+	case "ping":
+		return "/icmp-ping"
+	case "tcpping":
+		return "/tcp-ping"
+	case "portscan":
+		return "/port-scan"
+	case "dnslookup":
+		return "/dns-lookup"
+	case "history":
+		return "/history"
+	case "alerts":
+		return "/alerts"
+	case "settings":
+		return "/settings"
+	case "profile":
+		return "/profile"
+	default:
+		return "/"
 	}
-	return base + "/?panel=" + url.QueryEscape(panel)
 }
 
 func enqueueAlertEvaluation(user store.User, protocol, target string, port int, summary report.Summary, dashboardURL string) {
@@ -2475,6 +2627,57 @@ func handlePortScan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toJSONPortScanReport(rep))
 }
 
+func handleDNSLookup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	if _, ok := requireAuthenticatedUser(w, r); !ok {
+		return
+	}
+	if !isAllowedRequestOrigin(r) {
+		writeJSON(w, http.StatusForbidden, apiError{Error: "forbidden origin"})
+		return
+	}
+
+	var req dnsLookupRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+
+	target, err := normalizeHost(req.Target)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	timeout := dnslookup.DefaultTimeout
+	if req.TimeoutMs > 0 {
+		timeout = time.Duration(req.TimeoutMs) * time.Millisecond
+	}
+	timeout, err = normalizeDNSLookupTimeout(timeout)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+
+	release, ok := tryAcquireProbeSlot()
+	if !ok {
+		writeJSON(w, http.StatusTooManyRequests, apiError{Error: "server busy, try again"})
+		return
+	}
+	defer release()
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	rep, err := dnslookup.RunContext(ctx, target, dnslookup.Config{Timeout: timeout})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
 func handleHistory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
@@ -2518,6 +2721,31 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 		cancel()
 	}
 	writeJSON(w, http.StatusOK, points)
+}
+
+func handleRecentHistoryTargets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	user, ok := requireAuthenticatedUser(w, r)
+	if !ok {
+		return
+	}
+
+	limit, err := parseRecentHistoryTargetsLimit(r.URL.Query())
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+
+	targets, err := appStore.QueryRecentHistoryTargets(user.ID, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, targets)
 }
 
 func handleHistoryExport(w http.ResponseWriter, r *http.Request) {
@@ -2918,7 +3146,83 @@ func isAllowedWSOrigin(r *http.Request, origin string) bool {
 		requestPort = defaultPortForRequest(r)
 	}
 
-	return strings.EqualFold(originHost, requestHost) && originPort == requestPort
+	if hostsEquivalentForOrigin(originHost, requestHost) && originPort == requestPort {
+		return true
+	}
+
+	if len(appAllowedOrigins) == 0 {
+		return false
+	}
+
+	normalized, err := normalizeOrigin(origin)
+	if err != nil {
+		return false
+	}
+	_, ok := appAllowedOrigins[normalized]
+	return ok
+}
+
+func parseAllowedOrigins(raw string) (map[string]struct{}, error) {
+	origins := make(map[string]struct{})
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		normalized, err := normalizeOrigin(item)
+		if err != nil {
+			return nil, fmt.Errorf("invalid allowed origin %q: %w", item, err)
+		}
+		origins[normalized] = struct{}{}
+	}
+	return origins, nil
+}
+
+func hostsEquivalentForOrigin(left, right string) bool {
+	if strings.EqualFold(left, right) {
+		return true
+	}
+	return isLoopbackOriginHost(left) && isLoopbackOriginHost(right)
+}
+
+func isLoopbackOriginHost(raw string) bool {
+	host := strings.TrimSpace(strings.Trim(raw, "[]"))
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func normalizeOrigin(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", err
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("scheme and host are required")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("query and fragment are not allowed")
+	}
+	if path := strings.TrimSpace(u.Path); path != "" && path != "/" {
+		return "", fmt.Errorf("path is not allowed")
+	}
+
+	host, port := splitHostAndOptionalPort(u.Host)
+	if host == "" {
+		return "", fmt.Errorf("host is required")
+	}
+	if port == "" {
+		port = defaultPortForScheme(u.Scheme)
+	}
+	if port == "" {
+		return "", fmt.Errorf("port is required")
+	}
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(net.JoinHostPort(host, port)), nil
 }
 
 func splitHostAndOptionalPort(raw string) (string, string) {

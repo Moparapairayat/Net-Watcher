@@ -12,3 +12,5 @@ Thumbs.db
 
 .idea/
 .vscode/
+.tmp/
+deploy/cloudflared.runtime.yml

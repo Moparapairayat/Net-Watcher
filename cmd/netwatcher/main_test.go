@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -559,45 +558,30 @@ func TestBuildDashboardURLUsesPanel(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/", nil)
 	got := buildDashboardURL(req, "alerts")
-	want := "https://netwatcher.example.com/?panel=alerts"
+	want := "https://netwatcher.example.com/alerts"
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
 	}
 }
 
-func TestNewStaticHandlerServesIndexForAuthRoutes(t *testing.T) {
-	staticDir := t.TempDir()
-	indexBody := "<!doctype html><title>NetWatcher</title>"
-	if err := os.WriteFile(filepath.Join(staticDir, "index.html"), []byte(indexBody), 0o644); err != nil {
-		t.Fatalf("write index: %v", err)
+func TestNewBackendFallbackHandler(t *testing.T) {
+	handler := newBackendFallbackHandler()
+
+	rootReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	rootRR := httptest.NewRecorder()
+	handler.ServeHTTP(rootRR, rootReq)
+	if rootRR.Code != http.StatusOK {
+		t.Fatalf("root: expected 200, got %d", rootRR.Code)
 	}
-	if err := os.WriteFile(filepath.Join(staticDir, "styles.css"), []byte("body{}"), 0o644); err != nil {
-		t.Fatalf("write asset: %v", err)
-	}
-
-	handler := newStaticHandler(staticDir)
-
-	for _, path := range []string{"/", "/login", "/signup", "/verify-email", "/forgot-password", "/reset-password"} {
-		req := httptest.NewRequest(http.MethodGet, path, nil)
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-
-		if rr.Code != http.StatusOK {
-			t.Fatalf("%s: expected 200, got %d", path, rr.Code)
-		}
-		if !strings.Contains(rr.Body.String(), "NetWatcher") {
-			t.Fatalf("%s: expected index body, got %q", path, rr.Body.String())
-		}
+	if !strings.Contains(rootRR.Body.String(), "netwatcher-api") {
+		t.Fatalf("root: unexpected body %q", rootRR.Body.String())
 	}
 
-	assetReq := httptest.NewRequest(http.MethodGet, "/styles.css", nil)
-	assetRR := httptest.NewRecorder()
-	handler.ServeHTTP(assetRR, assetReq)
-	if assetRR.Code != http.StatusOK {
-		t.Fatalf("asset: expected 200, got %d", assetRR.Code)
-	}
-	if assetRR.Body.String() != "body{}" {
-		t.Fatalf("asset: unexpected body %q", assetRR.Body.String())
+	unknownReq := httptest.NewRequest(http.MethodGet, "/login", nil)
+	unknownRR := httptest.NewRecorder()
+	handler.ServeHTTP(unknownRR, unknownReq)
+	if unknownRR.Code != http.StatusNotFound {
+		t.Fatalf("unknown: expected 404, got %d", unknownRR.Code)
 	}
 }
 
@@ -731,6 +715,56 @@ func TestHandleHistoryIsUserScoped(t *testing.T) {
 	}
 }
 
+func TestHandleRecentHistoryTargetsReturnsStoredTargets(t *testing.T) {
+	st := installTestStore(t)
+	user, cookie := issueTestSession(t, st)
+
+	now := time.Now()
+	st.InsertAsync(store.ResultRecord{
+		UserID:   user.ID,
+		Ts:       now.Add(-2 * time.Minute),
+		Protocol: "ping",
+		Target:   "one.example",
+		Seq:      1,
+		RttMs:    float64Ptr(9.5),
+	})
+	st.InsertAsync(store.ResultRecord{
+		UserID:   user.ID,
+		Ts:       now.Add(-time.Minute),
+		Protocol: "tcpping",
+		Target:   "two.example",
+		Port:     443,
+		Seq:      1,
+		RttMs:    float64Ptr(13.2),
+	})
+
+	waitFor(t, time.Second, func() bool {
+		targets, err := st.QueryRecentHistoryTargets(user.ID, 10)
+		return err == nil && len(targets) == 2
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/history/recent-targets?limit=10", nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+
+	handleRecentHistoryTargets(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var targets []store.RecentHistoryTarget
+	if err := json.Unmarshal(rr.Body.Bytes(), &targets); err != nil {
+		t.Fatalf("decode recent targets: %v", err)
+	}
+	if len(targets) != 2 {
+		t.Fatalf("expected 2 recent targets, got %d", len(targets))
+	}
+	if targets[0].Protocol != "tcpping" || targets[0].Target != "two.example" {
+		t.Fatalf("unexpected first recent target: %#v", targets[0])
+	}
+}
+
 func TestHandlePortScanRejectsInvalidPayload(t *testing.T) {
 	st := installTestStore(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/portscan", strings.NewReader(`{"host":"example.com","ports":"80-9000"}`))
@@ -744,6 +778,37 @@ func TestHandlePortScanRejectsInvalidPayload(t *testing.T) {
 		t.Fatalf("expected 400, got %d", rr.Code)
 	}
 	if !strings.Contains(rr.Body.String(), "scan is limited") {
+		t.Fatalf("unexpected body: %s", rr.Body.String())
+	}
+}
+
+func TestNormalizeDNSLookupTimeoutBounds(t *testing.T) {
+	got, err := normalizeDNSLookupTimeout(0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got <= 0 {
+		t.Fatalf("expected positive timeout, got %s", got)
+	}
+
+	if _, err := normalizeDNSLookupTimeout(50 * time.Millisecond); err == nil {
+		t.Fatal("expected error for too-small timeout")
+	}
+}
+
+func TestHandleDNSLookupRejectsEmptyTarget(t *testing.T) {
+	st := installTestStore(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/dnslookup", strings.NewReader(`{"target":""}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(issueTestSessionCookie(t, st))
+	rr := httptest.NewRecorder()
+
+	handleDNSLookup(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "host is required") {
 		t.Fatalf("unexpected body: %s", rr.Body.String())
 	}
 }
