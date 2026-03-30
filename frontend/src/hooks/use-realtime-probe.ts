@@ -145,7 +145,7 @@ export function useRealtimeProbe<TRequest extends Record<string, unknown>>(confi
         abortRef.current = null;
       }
     },
-    [httpPath],
+    [httpPath, type],
   );
 
   const run = useCallback(

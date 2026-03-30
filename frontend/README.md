@@ -110,6 +110,20 @@ Run these only for local frontend development or verification:
 ```powershell
 pnpm lint
 pnpm build
+pnpm test:e2e
+```
+
+For E2E, keep the app stack running first and optionally point Playwright at a custom host:
+
+```powershell
+$env:PLAYWRIGHT_BASE_URL="http://127.0.0.1:8080"
+pnpm test:e2e
+```
+
+The E2E auth flow expects signup to return `preview_code`, so for local runs use a stack with email delivery disabled:
+
+```powershell
+$env:NETWATCHER_RESEND_API_KEY=""
 ```
 
 ## Next migration targets

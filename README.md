@@ -5,8 +5,8 @@ Net-Watcher is a self-hosted network diagnostics toolkit built with Go and a Nex
 
 ## Contributors
 
-- MOPARA PAIR AYAT — Developer
-- Additional contributors can be listed here
+- MOPARA PAIR AYAT
+- MONABBER EAMAN
 
 ## Overview
 
@@ -89,7 +89,7 @@ Core capabilities:
 - `POST /api/tcpping`
 - `POST /api/portscan`
 - `GET /api/history`
-- `GET /api/export/history`
+- `POST /api/export/history`
 - `GET /healthz`
 - `GET /ws`
 
@@ -152,13 +152,17 @@ curl "http://127.0.0.1:8080/api/history?type=tcpping&host=example.com&port=443&l
 Download JSON:
 
 ```bash
-curl -OJ "http://127.0.0.1:8080/api/export/history?type=tcpping&host=example.com&port=443&limit=50&format=json"
+curl -X POST http://127.0.0.1:8080/api/export/history \
+  -H "Content-Type: application/json" \
+  -d '{"type":"tcpping","host":"example.com","port":443,"limit":50,"format":"json"}'
 ```
 
 Upload CSV to configured S3-compatible object storage:
 
 ```bash
-curl "http://127.0.0.1:8080/api/export/history?type=tcpping&host=example.com&port=443&limit=50&format=csv&destination=s3"
+curl -X POST http://127.0.0.1:8080/api/export/history \
+  -H "Content-Type: application/json" \
+  -d '{"type":"tcpping","host":"example.com","port":443,"limit":50,"format":"csv","destination":"s3"}'
 ```
 
 ## Production Stack
@@ -214,6 +218,22 @@ Run vet:
 ```bash
 go vet ./...
 ```
+
+Run the HTTP smoke test against a running local stack:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-test.ps1 -BaseUrl http://127.0.0.1:8080
+```
+
+GitHub Actions now runs:
+
+- `go test ./...`
+- `go vet ./...`
+- `go test -race ./cmd/netwatcher ./internal/store ./internal/portscan ./internal/dnslookup`
+- frontend `pnpm lint`
+- frontend `pnpm build`
+- frontend Playwright E2E
+- Docker compose smoke checks through `scripts/smoke-test.ps1`
 
 ## Notes
 
