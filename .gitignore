@@ -1,0 +1,16 @@
+*.exe
+*.exe~
+*_test.exe
+*.log
+*.db
+*.db-shm
+*.db-wal
+.env
+
+.DS_Store
+Thumbs.db
+
+.idea/
+.vscode/
+.tmp/
+deploy/cloudflared.runtime.yml
